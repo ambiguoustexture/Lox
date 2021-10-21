@@ -10,7 +10,7 @@ import java.util.List;
 
 public class Lox 
 {
-    static boolean HadError = false;
+    static boolean hadError = false;
     
     public static void main(String[] args) throws IOException 
     {
@@ -32,7 +32,7 @@ public class Lox
         run(new String(bytes, Charset.defaultCharset()));
 
         // Indicate an error in the exit code.
-        if (HadError) System.exit(65);
+        if (hadError) System.exit(65);
     }
 
     // Fire up jlox without any arguments, 
@@ -52,7 +52,7 @@ public class Lox
             // Need to reset this flag in the interactive loop. 
             // If the user makes a mistake, 
             // it shouldn’t kill their entire session.
-            HadError = false;
+            hadError = false;
         }
     }
 
@@ -62,11 +62,13 @@ public class Lox
     {
         Scanner scanner = new Scanner(source);
         List<Token> tokens = scanner.scanTokens();
+        Parser parser = new Parser(tokens);
+        Expr expression = parser.parse();
 
-        // for now, just print the tokens
-        for (Token token : tokens) {
-            System.out.println(token);
-        }
+        // Stop if there was a syntax error.
+        if (hadError) return ;
+
+        System.out.println(new AstPrinter().print(expression));
     }
 
     static void error(int line, String message) 
@@ -78,6 +80,15 @@ public class Lox
     {
         System.err.println(
             "[line " + line + "] Error" + where + ": " + message);
-        HadError = true;
+        hadError = true;
+    }
+
+    static void error(Token token, String message) 
+    {
+        if (token.type == TokenType.EOF) {
+            report(token.line, " at end", message);
+        } else {
+            report(token.line, "at '" + token.lexeme + "'", message);
+        }
     }
 }
