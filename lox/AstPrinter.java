@@ -24,11 +24,18 @@ class AstPrinter implements Expr.Visitor<String>
     }
     
     @Override
-    public String visitLiteralExpr(Expr.Literal expr) {
+    public String visitLiteralExpr(Expr.Literal expr) 
+    {
         if (expr.value == null) return "nil";
         return expr.value.toString();
     }
-    
+
+    @Override
+    public String visitLogicalExpr(Expr.Logical expr)
+    {
+        return parenthesize(expr.operator.lexeme, expr.left, expr.right);
+    }
+
     @Override
     public String visitUnaryExpr(Expr.Unary expr) {
         return parenthesize(expr.operator.lexeme, expr.right);
