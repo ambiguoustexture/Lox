@@ -16,6 +16,12 @@ class AstPrinter implements Expr.Visitor<String>
         return parenthesize(expr.operator.lexeme,
             expr.left, expr.right);
     }
+
+    @Override
+    public String visitCallExpr(Expr.Call expr)
+    {
+        return parenthesize2("call", expr.callee, expr.arguments);
+    }
     
     @Override
     public String visitGroupingExpr(Expr.Grouping expr) 
