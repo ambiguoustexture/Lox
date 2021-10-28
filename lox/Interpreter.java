@@ -95,6 +95,31 @@ class Interpreter implements Expr.Visitor<Object>,
     }
 
     @Override
+    public Object visitSuperExpr(Expr.Super expr) 
+    {
+        // Look up the surrounding class’s superclass 
+        // by looking up “super” in the proper environment.
+        int distance = locals.get(expr);
+        LoxClass superclass = (LoxClass)environment.getAt(distance, "super");
+        // When access a method, 
+        // also need to bind this to the object the method is accessed from. 
+        
+        // The environment where “this” is bound 
+        // is always right inside the environment 
+        // where store “super”.
+        LoxInstance object = (LoxInstance)environment.getAt(distance - 1, "this");
+
+        LoxFunction method = superclass.findMethod(expr.method.lexeme);
+    
+        if (method == null) {
+            throw new RuntimeError(expr.method, 
+                "Undefined property '" + expr.method.lexeme + "'.");
+        }
+
+        return method.bind(object);
+    }
+
+    @Override
     public Object visitEgoExpr(Expr.Ego expr)
     {
         return lookUpVariable(expr.keyword, expr);
@@ -160,6 +185,19 @@ class Interpreter implements Expr.Visitor<Object>,
     @Override
     public Void visitClassStmt(Stmt.Class stmt)
     {
+        // If the class has a superclass expression, evaluate it. 
+        // Since that could potentially evaluate to some other kind of object, 
+        // have to check at runtime that the thing 
+        // you want to be the superclass is actually a class.
+        Object superclass = null;
+        if (stmt.superclass != null) {
+            superclass = evaluate(stmt.superclass);
+            if (!(superclass instanceof LoxClass)) {
+                throw new RuntimeError(stmt.superclass.name, 
+                    "Superclass must be a class.");
+            }
+        }
+        
         // Declare the class’s name in the current environment.
         // Then turn the class syntax node into a LoxClass,
         // the runtime representation of a class.
@@ -168,6 +206,14 @@ class Interpreter implements Expr.Visitor<Object>,
         // inside its own methods.
 
         environment.define(stmt.name.lexeme, null);
+
+        // When evaluate a subclass definition, 
+        // create a new environment.
+        if (stmt.superclass != null) {
+            environment = new Environment(environment);
+            environment.define("super", superclass);
+        }
+
         Map<String, LoxFunction> methods = new HashMap<>();
         for (Stmt.Function method : stmt.methods) {
             LoxFunction function = new LoxFunction(method, environment,
@@ -175,7 +221,20 @@ class Interpreter implements Expr.Visitor<Object>,
             methods.put(method.name.lexeme, function);
         }
 
-        LoxClass klass = new LoxClass(stmt.name.lexeme, methods);  
+        LoxClass klass = new LoxClass(stmt.name.lexeme, (LoxClass)superclass, methods);  
+
+        // Inside that environment, store a reference to the superclass —- 
+        // the actual LoxClass object for the superclass which have now 
+        // that are in the runtime. 
+        // Then create the LoxFunctions for each method. 
+        // Those will capture the current environment —- 
+        // the one where just bound “super” as their closure, 
+        // holding onto the superclass like need. 
+        // Once that’s done, pop the environment.
+        if (superclass != null) {
+            environment = environment.enclosing;
+        }
+
         environment.assign(stmt.name, klass);
 
         return null;

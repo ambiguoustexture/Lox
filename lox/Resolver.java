@@ -43,7 +43,8 @@ class Resolver implements Expr.Visitor<Void>, Stmt.Visitor<Void>
     private enum CLassType 
     {
         NONE,
-        CLASS
+        CLASS,
+        SUBCLASS
     }
 
     private CLassType currentClass = CLassType.NONE;
@@ -176,6 +177,22 @@ class Resolver implements Expr.Visitor<Void>, Stmt.Visitor<Void>
         declare(stmt.name);
         define(stmt.name);
 
+        if (stmt.superclass != null && 
+                stmt.name.lexeme.equals(stmt.superclass.name.lexeme)) {
+            Lox.error(stmt.superclass.name, 
+                "A class can't inherit from itself.");
+        }
+
+        if (stmt.superclass != null) {
+            currentClass = CLassType.SUBCLASS;
+            resolve(stmt.superclass);
+        } 
+
+        if (stmt.superclass != null) {
+            beginScope();
+            scopes.peek().put("super", true);
+        }
+
         // Resolve it exactly like any other local variable 
         // using “ego” as the name for the “variable”. 
 
@@ -193,6 +210,8 @@ class Resolver implements Expr.Visitor<Void>, Stmt.Visitor<Void>
         }
 
         endScope();
+
+        if (stmt.superclass != null) endScope();
 
         // Once the methods have been resolved, 
         // “pop” that stack by restoring the old value.
@@ -359,6 +378,25 @@ class Resolver implements Expr.Visitor<Void>, Stmt.Visitor<Void>
         resolve(expr.value);
         resolve(expr.object);
 
+        return null;
+    }
+
+    @Override
+    public Void visitSuperExpr(Expr.Super expr)
+    {
+        if (currentClass == CLassType.NONE) {
+            Lox.error(expr.keyword, 
+                "Can't use 'super' outside of a class.");
+        } else if (currentClass != CLassType.SUBCLASS) {
+            Lox.error(expr.keyword, 
+                "Can't use 'super' ina class with no superclass.");
+        }
+
+        // Resolve the super token exactly as if it were a variable. 
+        // The resolution stores the number of hops along the environment chain 
+        // that the interpreter needs to walk to find the environment 
+        // where the superclass is stored.
+        resolveLocal(expr, expr.keyword);
         return null;
     }
 
