@@ -35,8 +35,18 @@ class Resolver implements Expr.Visitor<Void>, Stmt.Visitor<Void>
     private enum FunctionType 
     {
         NONE,
-        FUNCTION
+        FUNCTION,
+        INITIALIZER,
+        METHOD
     }
+
+    private enum CLassType 
+    {
+        NONE,
+        CLASS
+    }
+
+    private CLassType currentClass = CLassType.NONE;
 
     private void resolve(Stmt stmt)
     {
@@ -154,6 +164,42 @@ class Resolver implements Expr.Visitor<Void>, Stmt.Visitor<Void>
         return null;
     }
 
+    @Override 
+    public Void  visitClassStmt(Stmt.Class stmt)
+    {
+        // Store the previous value of the field in a local variable. 
+        // This lets us piggyback onto the JVM 
+        // to keep a stack of currentClass values.
+        CLassType enclosingClass = currentClass;
+        currentClass = CLassType.CLASS;
+
+        declare(stmt.name);
+        define(stmt.name);
+
+        // Resolve it exactly like any other local variable 
+        // using “ego” as the name for the “variable”. 
+
+        // Before step in and start resolving the method bodies, 
+        // push a new scope and define “ego” in it as if it were a variable. 
+        // Then, when done, discard that surrounding scope.
+        beginScope();
+        scopes.peek().put("ego", true);
+
+        for (Stmt.Function method : stmt.methods) {
+            FunctionType declaration = FunctionType.METHOD;
+            if (method.name.lexeme.equals("init")) {
+                declaration = FunctionType.INITIALIZER;
+            }
+        }
+
+        endScope();
+
+        // Once the methods have been resolved, 
+        // “pop” that stack by restoring the old value.
+        currentClass = enclosingClass;
+        return null;
+    }
+
     @Override
     public Void visitExpressionStmt(Stmt.Expression stmt)
     {
@@ -217,6 +263,10 @@ class Resolver implements Expr.Visitor<Void>, Stmt.Visitor<Void>
         }
 
         if (stmt.value != null) {
+            if (currentFunction == FunctionType.INITIALIZER) {
+                Lox.error(stmt.keyword,
+                    "Can't return a value from an initializer.");
+            }
             resolve(stmt.value);
         }
 
@@ -271,6 +321,14 @@ class Resolver implements Expr.Visitor<Void>, Stmt.Visitor<Void>
     }
 
     @Override
+    public Void visitGetExpr(Expr.Get expr) 
+    {
+        resolve(expr.object);
+
+        return null;
+    }
+
+    @Override
     public Void visitGroupingExpr(Expr.Grouping expr)
     {
         resolve(expr.expression);
@@ -292,6 +350,32 @@ class Resolver implements Expr.Visitor<Void>, Stmt.Visitor<Void>
         resolve(expr.left);
         resolve(expr.right);
 
+        return null;
+    }
+
+    @Override
+    public Void visitSetExpr(Expr.Set expr)
+    {
+        resolve(expr.value);
+        resolve(expr.object);
+
+        return null;
+    }
+
+    @Override
+    public Void visitEgoExpr(Expr.Ego expr) 
+    {
+        // When resolve a "ego" expression, 
+        // the currentClass field gives the bit of data 
+        // need to report an error 
+        // if the expression doesn’t occur nestled inside a method body.
+        if (currentClass == CLassType.NONE) {
+            Lox.error(expr.keyword,
+                "Can't use 'echo' outside of a class.");
+        }
+        
+        resolveLocal(expr, expr.keyword);
+        
         return null;
     }
 

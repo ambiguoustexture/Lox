@@ -74,6 +74,32 @@ class Interpreter implements Expr.Visitor<Object>,
         return evaluate(expr.right);
     }
 
+    @Override
+    public Object visitSetExpr(Expr.Set expr) 
+    {
+        // Evaluate the object whose property is being set and 
+        // check to see if it’s a LoxInstance. 
+        // If not, that’s a runtime error. 
+        // Otherwise, evaluate the value being set and 
+        // store it on the instance.
+        Object object = evaluate(expr.object);
+
+        if (!(object instanceof LoxInstance)) {
+            throw new RuntimeError(expr.name,
+                "Only instances have fields.");
+        }
+
+        Object value = evaluate(expr.value);
+        ((LoxInstance)object).set(expr.name, value);
+        return value;
+    }
+
+    @Override
+    public Object visitEgoExpr(Expr.Ego expr)
+    {
+        return lookUpVariable(expr.keyword, expr);
+    }
+
     // Evaluating parentheses
     @Override 
     public Object visitGroupingExpr(Expr.Grouping expr) 
@@ -132,6 +158,30 @@ class Interpreter implements Expr.Visitor<Object>,
     }
 
     @Override
+    public Void visitClassStmt(Stmt.Class stmt)
+    {
+        // Declare the class’s name in the current environment.
+        // Then turn the class syntax node into a LoxClass,
+        // the runtime representation of a class.
+        // Circle back and store the class object in the variable previously declared.
+        // That two-stage variable binding process allows references to the class
+        // inside its own methods.
+
+        environment.define(stmt.name.lexeme, null);
+        Map<String, LoxFunction> methods = new HashMap<>();
+        for (Stmt.Function method : stmt.methods) {
+            LoxFunction function = new LoxFunction(method, environment,
+                method.name.lexeme.equals("init"));
+            methods.put(method.name.lexeme, function);
+        }
+
+        LoxClass klass = new LoxClass(stmt.name.lexeme, methods);  
+        environment.assign(stmt.name, klass);
+
+        return null;
+    }
+
+    @Override
     public Void visitExpressionStmt(Stmt.Expression stmt) 
     {
         evaluate(stmt.expression);
@@ -151,7 +201,7 @@ class Interpreter implements Expr.Visitor<Object>,
         // and store a reference to it there.
 
         // When create a LoxFunction, capture the current environment.
-        LoxFunction function = new LoxFunction(stmt, environment);
+        LoxFunction function = new LoxFunction(stmt, environment, false);
         // This is the environment that is active 
         // when the function is declared not when it’s called, 
         // which is what want. 
@@ -386,7 +436,7 @@ class Interpreter implements Expr.Visitor<Object>,
         Object callee = evaluate(expr.callee);
 
         List<Object> arguments = new ArrayList<>();
-        for (Expr argument : expr.arguments) { // FIXME
+        for (Expr argument : expr.arguments) { 
             arguments.add(evaluate(argument));
         }
 
@@ -402,5 +452,21 @@ class Interpreter implements Expr.Visitor<Object>,
                 arguments.size() + ".");
         }
         return function.call(this, arguments);
+    }
+
+    @Override
+    public Object visitGetExpr(Expr.Get expr)
+    {
+        // First, evaluate the expression whose property is being accessed. 
+        // In Lox, only instances of classes have properties. 
+        // If the object is some other type like a number, 
+        // invoking a getter on it is a runtime error.
+        Object object = evaluate(expr.object);
+        if (object instanceof LoxInstance) {
+            return ((LoxInstance) object).get(expr.name);
+        }
+
+        throw new RuntimeError(expr.name,
+            "Only instances have properties.");
     }
 }
