@@ -61,22 +61,34 @@ int disassembleInstruction(Chunk* chunk, int offset)
      */
     printf("%04d ", offset);
 
-    /*
-     * In our disassembler, it’s helpful to show which source line each instruction was compiled from. That gives us a way to map back to the original code when we’re trying to figure out what some blob of bytecode is supposed to do. After printing the offset of the instruction—the number of bytes from the beginning of the chunk—we show its source line.
-     */
     if (offset > 0 && 
         chunk->lines[offset] == chunk->lines[offset - 1]) {
         printf("   | ");
     } else {
-        printf("%4d ", chunk->code[offset]);
+        printf("%4d ", chunk->lines[offset]);
     }
 
     uint8_t instruction = chunk->code[offset];
     switch (instruction) {
         case OP_CONSTANT:
             return constantInstruction("OP_CONSTANT", chunk, offset);
+        /* The arithmetic instruction formats are simple, like OP_RETURN. 
+         * Even though the arithmetic operators take operands —— 
+         * which are found on the stack —— 
+         * the arithmetic bytecode instructions do not.
+         */
+        case OP_ADD:
+            return simpleInstruction("OP_ADD",      offset);
+        case OP_SUBTRACT:
+            return simpleInstruction("OP_SUBTRACT", offset);
+        case OP_MULTIPLY:
+            return simpleInstruction("OP_MULTIPLY", offset);
+        case OP_DIVIDE:
+            return simpleInstruction("OP_DIVIDE",   offset);
+        case OP_NEGATE:
+            return simpleInstruction("OP_NEGATE",   offset);
         case OP_RETURN:
-            return simpleInstruction("OP_RETURN", offset);
+            return simpleInstruction("OP_RETURN",   offset);
         default:
             printf("Unknown opcode %d\n", instruction);
             return offset + 1;
