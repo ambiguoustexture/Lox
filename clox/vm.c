@@ -1,4 +1,5 @@
 #include <stdio.h>
+#include <stdarg.h>
 
 #include "common.h"
 #include "compiler.h"
@@ -15,6 +16,31 @@ static void resetStack()
      * to indicate that the stack is empty.
      */
     vm.stackTop = vm.stack;
+}
+
+static void runtimeError(const char* format, ...)
+{
+    /* Using variadic functions: 
+     * ones that take a varying number of arguments.
+     * The ... and va_list stuff let us 
+     * pass an arbitrary number of arguments to runtimeError(). 
+     * It forwards those on to vfprintf(), 
+     * which is the flavor of printf() that takes an explicit va_list. */
+    va_list args;
+    va_start(args, format);
+    vfprintf(stderr, format, args);
+    va_end(args);
+    fputs("\n", stderr);
+
+    /* Look into the chunk’s debug line array 
+     * using the current bytecode instruction index minus one. 
+     * That’s because the interpreter advances 
+     * past each instruction before executing it. */
+    size_t instruction = vm.ip - vm.chunk->code - 1;
+    int line = vm.chunk->lines[instruction];
+    fprintf(stderr, "[line %d] in script\n", line);
+
+    resetStack();
 }
 
 void initVM() {
@@ -38,15 +64,28 @@ void push(Value value)
 
 Value pop()
 {
-    /*
-     * First, move the stack pointer back 
+    /* First, move the stack pointer back 
      * to get to the most recent used slot in the array. 
      * Then look up the value at that index and return it. 
      * Don’t need to explicitly “remove” it from the array 
-     * —— moving stackTop down is enough to mark that slot as no longer in use.
-     */
+     * —— moving stackTop down is enough 
+     * to mark that slot as no longer in use. */
     vm.stackTop--;
     return *vm.stackTop;
+}
+
+static Value peek(int distance) 
+{
+    /* It returns a value from the stack but doesn’t pop it. 
+     * The distance argument is how far 
+     * down from the top of the stack to look: 
+     * zero is the top, one is one slot down, etc. */
+    return vm.stackTop[-1 - distance];
+}
+
+static bool isFalsey(Value value)
+{
+    return IS_NIL(value) || (IS_BOOL(value) && !AS_BOOL(value));
 }
 
 static InterpretResult run()
@@ -73,16 +112,23 @@ static InterpretResult run()
  */
 #define READ_CONSTANT() (vm.chunk->constants.values[READ_BYTE()])
 
-/*
- * A binary operator takes two operands, 
- * so it pops twice. 
- * It performs the operation on those two values and then pushes the result.
+/*  First, check that the two operands are both numbers. 
+ *  If either isn’t, report a runtime error and yank the ejection seat lever. 
+ *
+ *  If the operands are fine, 
+ *  pop them both and unwrap them. 
+ *  Then apply the given operator, wrap the result, 
+ *  and push it back on the stack.
  */
-#define BINARY_OP(op) \
+#define BINARY_OP(valueType, op) \
     do {\
-        double b = pop(); \
-        double a = pop(); \
-        push(a op b); \
+        if (!IS_NUMBER(peek(0)) || !IS_NUMBER(peek(1))) { \
+            runtimeError("Operands must be numbers."); \
+            return INTERPRET_RUNTIME_ERROR; \
+        } \
+        double b = AS_NUMBER(pop()); \
+        double a = AS_NUMBER(pop()); \
+        push(valueType(a op b)); \
     } while (false);
 
     for (;;) {
@@ -126,18 +172,45 @@ static InterpretResult run()
                 push(constant);
                 break;
             }
-            case OP_ADD:      BINARY_OP(+); break;
-            case OP_SUBTRACT: BINARY_OP(-); break;
-            case OP_MULTIPLY: BINARY_OP(*); break;
-            case OP_DIVIDE:   BINARY_OP(/); break;
+            
+            /* Since parsePrecedence() has already consumed the keyword token,
+             * all need to do is output the proper instruction.
+             * Figure that out based on the type of token we parsed. */
+            case OP_NIL:      push(NIL_VAL);            break;
+            case OP_TRUE:     push(BOOL_VAL(true));     break;
+            case OP_FALSE:    push(BOOL_VAL(false));    break;
+
+            case OP_EQUAL: {
+                Value b = pop();
+                Value a = pop();
+                push(BOOL_VAL(valuesEqual(a, b)));
+                break;
+            }
+
+            case OP_GREATER:  BINARY_OP(BOOL_VAL,   >); break;
+            case OP_LESS:     BINARY_OP(BOOL_VAL,   <); break;
+            
+            case OP_ADD:      BINARY_OP(NUMBER_VAL, +); break;
+            case OP_SUBTRACT: BINARY_OP(NUMBER_VAL, -); break;
+            case OP_MULTIPLY: BINARY_OP(NUMBER_VAL, *); break;
+            case OP_DIVIDE:   BINARY_OP(NUMBER_VAL, /); break;
+            case OP_NOT:      push(BOOL_VAL(isFalsey(pop()))); break;
             case OP_NEGATE: {
-                /*
-                 * The instruction needs a value to operate on 
-                 * which it gets by popping from the stack. 
-                 * It negates that, then pushes the result back on 
-                 * for later instructions to use.
+                /* First, check to see if the value on top of the stack 
+                 * is a number. 
+                 * If it’s not, report the runtime error and 
+                 * stop the interpreter. 
+                 * Otherwise, keep going. 
+                 * Only after this validation do unwrap the operand, 
+                 * negate it, wrap the result and push it.
                  */
-                push(-pop()); break;
+                if (!IS_NUMBER(peek(0))) {
+                    runtimeError("Operand must be a number.");
+                    return INTERPRET_RUNTIME_ERROR;
+                }
+
+                push(NUMBER_VAL(-AS_NUMBER(pop())));
+                break;
             }
             case OP_RETURN: {
                 printValue(pop());
