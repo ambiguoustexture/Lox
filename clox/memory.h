@@ -2,6 +2,25 @@
 #define clox_memory_h
 
 #include "common.h"
+#include "object.h"
+
+/* Low-level macro that allocates an array 
+ * with a given element type and count. */
+#define ALLOCATE(type, count) \
+    /* (type*)reallocate(NULL, 0, sizeof(type) * (count)) */ \
+    reallocate(NULL, 0, sizeof(type) * (count))
+/* FIXME? Commented for:
+ * vm.c:112:19: error: expected expression
+ *     char* chars = ALLOCATE(chars, length + 1);
+ *                   ^
+ * ./memory.h:10:11: note: expanded from macro 'ALLOCATE'
+ *     (type*)reallocate(NULL, 0, sizeof(type) * (count)) 
+ *           ^
+ * 1 error generated. */
+
+/* A tiny wrapper around reallocate() 
+ * that “resizes” an allocation down to zero bytes. */
+#define FREE(type, pointer) reallocate(pointer, sizeof(type), 0)
 
 /*
  * This macro calculates a new capacity 
@@ -36,6 +55,7 @@
      reallocate(pointer, sizeof(type) * (oldCount), 0)
 
 void* reallocate(void* pointer, size_t oldSize, size_t newSize);
+void freeObjects();
 
 #endif
 

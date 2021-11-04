@@ -56,6 +56,9 @@ typedef struct {
      * That seems a little odd, but almost every implementation does this.
      */
     Value* stackTop;
+
+    /* The VM stores a pointer to the head of the intrusive list. */
+    Obj* objects;
 } VM;
 
 typedef enum {
@@ -63,6 +66,10 @@ typedef enum {
     INTERPRET_COMPILE_ERROR,
     INTERPRET_RUNTIME_ERROR,
 } InterpretResult;
+
+/* The “object” module is directly using the global vm variable 
+ * from the “vm” module, so need to expose that externally. */
+extern VM vm;
 
 void initVM();
 void freeVM();

@@ -272,6 +272,17 @@ static void number()
     emitConstant(NUMBER_VAL(strtod(parser.previous.start, NULL)));
 }
 
+static void string()
+{
+    /* This takes the string’s characters 
+     * directly from the lexeme. 
+     * The + 1 and - 2 parts trim the leading and trailing quotation marks. 
+     * It then creates a string object, 
+     * wraps it in a Value, and stuffs it into the constant table. */
+    emitConstant(OBJ_VAL(copyString(parser.previous.start + 1, 
+                                    parser.previous.length - 2)));
+}
+
 static void unary()
 {
     TokenType operatorType = parser.previous.type;
@@ -311,7 +322,7 @@ ParseRule rules[] = {
     [TOKEN_LESS]          = {NULL,     binary, PREC_COMPARISON},
     [TOKEN_LESS_EQUAL]    = {NULL,     binary, PREC_COMPARISON},
     [TOKEN_IDENTIFIER]    = {NULL,     NULL,   PREC_NONE},
-    [TOKEN_STRING]        = {NULL,     NULL,   PREC_NONE},
+    [TOKEN_STRING]        = {string,   NULL,   PREC_NONE},
     [TOKEN_NUMBER]        = {number,   NULL,   PREC_NONE},
     [TOKEN_AND]           = {NULL,     NULL,   PREC_NONE},
     [TOKEN_CLASS]         = {NULL,     NULL,   PREC_NONE},
