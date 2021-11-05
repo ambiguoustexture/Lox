@@ -50,10 +50,14 @@ void initVM() {
     resetStack();
 
     vm.objects = NULL;
+    /* When spin up a new VM, the string table is empty. */
+    initTable(&vm.strings);
 }
 
 void freeVM() 
 {
+    /* When shut down the VM, clean up any resources used by the table. */
+    freeTable(&vm.strings);
     /* Once the program is done, free every object. */
     freeObjects();   
 }

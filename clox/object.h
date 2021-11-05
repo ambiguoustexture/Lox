@@ -36,6 +36,12 @@ struct ObjString {
 
     int length;
     char* chars;
+
+    /* Each ObjString stores the hash code for that string. 
+     * Since strings are immutable in Lox, 
+     * can calculate it once up front 
+     * and be certain that it will never get invalidated. */
+    uint32_t hash;
 };
 
 ObjString* takeString(char* chars, int length);

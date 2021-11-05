@@ -7,4 +7,4 @@ $(prog): $(source)
 	$(cc) $(source) -g -o $(prog)
 
 clean:
-	rm -rf clox clox.dSYM
+	rm -rf clox clox.dSYM build

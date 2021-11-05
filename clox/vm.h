@@ -2,6 +2,7 @@
 #define clox_vm_h
 
 #include "chunk.h"
+#include "table.h"
 #include "value.h"
 
 #define STACK_MAX 256
@@ -56,6 +57,9 @@ typedef struct {
      * That seems a little odd, but almost every implementation does this.
      */
     Value* stackTop;
+ 
+    /* String Interning */
+    Table strings;
 
     /* The VM stores a pointer to the head of the intrusive list. */
     Obj* objects;

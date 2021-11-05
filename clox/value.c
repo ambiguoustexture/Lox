@@ -55,20 +55,11 @@ bool valuesEqual(Value a, Value b)
         case VAL_BOOL:   return AS_BOOL(a)   == AS_BOOL(b);
         case VAL_NIL:    return true;
         case VAL_NUMBER: return AS_NUMBER(a) == AS_NUMBER(b);
-        case VAL_OBJ: {
-            /* If the two values are both strings, 
-             * then they are equal if their character arrays 
-             * contain the same characters, 
-             * regardless of whether they are two separate objects 
-             * or the exact same one. 
-             * This does mean that string equality 
-             * is slower than equality 
-             * on other types since it has to walk the whole string. */
-            ObjString* aString = AS_STRING(a);
-            ObjString* bString = AS_STRING(b);
-            return aString->length == bString->length && 
-                memcmp(aString->chars, bString->chars, aString->length) == 0;
-        }
+        /* In fact, now that have interned all the strings, 
+         * can take advantage of it in the bytecode interpreter. 
+         * When a user does == on two objects that happen to be strings, 
+         * there is no need to test the characters any more. */ 
+        case VAL_OBJ:    return AS_OBJ(a) == AS_OBJ(b);
         default:
             return false; // Unreachable.
     }
