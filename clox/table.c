@@ -63,7 +63,19 @@ static Entry* findEntry(Entry* entries, int capacity, ObjString* key)
                 // Found a tombstone.
                 if (tombstone == NULL) tombstone = entry;
             }
-        } else if (entry->key == key) {
+        // } else if (entry->key == key) {
+        /* Commented for 
+         * there is no "==" operator override for the struct `ObjString`:
+         * struct ObjString {
+         *     Obj obj;
+         *     int length;
+         *     char* chars;
+         *     uint32_t hash;
+         * };
+         *
+         * Instead, compare their hash.
+         */
+        } else if (entry->key->hash == key->hash) {
             // Found the key
             return entry;
         }
