@@ -69,7 +69,7 @@ static uint32_t fnv1a32(const char* key, int length)
     uint32_t hash = 2166136261u;
 
     for (int i = 0; i < length; i++) {
-        hash ^= key[1];
+        hash ^= key[i];
         hash *= 16777619; /* The number 16777619 is a prime!*/
     }
     

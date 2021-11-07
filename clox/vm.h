@@ -61,6 +61,13 @@ typedef struct {
     /* String Interning */
     Table strings;
 
+    /* Global Variables 
+     *
+     * Need a place to store these globals. 
+     * Since want them to persist as long as clox is running, 
+     * store them right in the VM. */
+    Table globals;
+
     /* The VM stores a pointer to the head of the intrusive list. */
     Obj* objects;
 } VM;
