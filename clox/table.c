@@ -41,7 +41,6 @@ static Entry* findEntry(Entry* entries, int capacity, ObjString* key)
 
     for (;;) {
         Entry* entry = &entries[index];
-
         /* If the key for that entry in the array is NULL, 
          * then the bucket is empty.  
          * 
@@ -63,9 +62,9 @@ static Entry* findEntry(Entry* entries, int capacity, ObjString* key)
                 // Found a tombstone.
                 if (tombstone == NULL) tombstone = entry;
             }
-        } else if (entry->key == key) {
-            // Found the key
-            return entry;
+        } else if (entry->key->hash == key->hash) {
+                // Found the key
+                return entry;
         }
         
         /* Otherwise, the bucket has an entry in it, 

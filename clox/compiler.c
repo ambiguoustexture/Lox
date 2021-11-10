@@ -331,7 +331,6 @@ static void namedVariable(Token name, bool canAssign)
     } else {
         emitBytes(OP_GET_GLOBAL, arg);
     }
-    emitBytes(OP_GET_GLOBAL, arg);
 }
 
 static void variable(bool canAssign)
