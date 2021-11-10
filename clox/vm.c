@@ -234,6 +234,32 @@ static InterpretResult run()
              * that `OP_POP` instruction pops the top value off the stack 
              * and forgets it */
             case OP_POP:      pop();                    break;
+
+            case OP_GET_LOCAL: {
+                /* It takes a single byte operand for the stack slot 
+                 * where the local lives. 
+                 * It loads the value from that index and 
+                 * then pushes it on top of the stack 
+                 * where later instructions can find it. */
+                uint8_t slot = READ_BYTE();
+                push(vm.stack[slot]);
+                break;                
+            }
+
+            case OP_SET_LOCAL: {
+                /* It takes the assigned value from the top of the stack and 
+                 * stores it in the stack slot corresponding 
+                 * to the local variable. 
+                 * Note that it doesn’t pop the value from the stack. 
+                 * Remember, assignment is an expression, 
+                 * and every expression produces a value. 
+                 * The value of an assignment expression 
+                 * is the assigned value itself, 
+                 * so the VM just leaves the value on the stack. */
+                uint8_t slot = READ_BYTE();
+                vm.stack[slot] = peek(0);
+                break;
+            }
     
             case OP_GET_GLOBAL: {
                 /* Pull the constant table index 
