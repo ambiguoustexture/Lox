@@ -2,18 +2,30 @@
 #define clox_object_h
 
 #include "common.h"
+#include "chunk.h"
 #include "value.h"
 
 /* Macro that extracts the object type tag from a given Value. */
-#define OBJ_TYPE(value) (AS_OBJ(value)->type)
+#define OBJ_TYPE(value)     (AS_OBJ(value)->type)
+
+#define IS_FUNCTION(value)  isObjType(value, OBJ_FUNCTION)
+
+/* A macro to see if a value is a native function. */
+#define IS_NATIVE(value)    isObjType(value, OBJ_NATIVE)
 
 /* Macro that detects a cast is safe. */
-#define IS_STRING(value) isObjType(value, OBJ_STRING)
+#define IS_STRING(value)    isObjType(value, OBJ_STRING)
 
-#define AS_STRING(value)   ((ObjString*)AS_OBJ(value))
-#define AS_CSTRING(value) (((ObjString*)AS_OBJ(value))->chars)
+#define AS_FUNCTION(value)  ((ObjFunction*)AS_OBJ(value))
+#define AS_NATIVE(value) \
+    (((ObjNative*)AS_OBJ(value))->function)
+
+#define AS_STRING(value)    ((ObjString*)AS_OBJ(value))
+#define AS_CSTRING(value)   (((ObjString*)AS_OBJ(value))->chars)
 
 typedef enum {
+    OBJ_FUNCTION,
+    OBJ_NATIVE,
     OBJ_STRING,
 } ObjType;
 
@@ -27,6 +39,34 @@ struct Obj {
      * Each Obj gets a pointer to the next Obj in the chain. */
     struct Obj* next;
 };
+
+typedef struct {
+    Obj        obj;
+    int        arity;
+    Chunk      chunk;
+    ObjString* name;
+} ObjFunction;
+
+/* A programming language implementation 
+ * reaches out and touches the material world through native functions.
+ * If want to be able to write programs
+ * that check the time, read user input, or access the file system,
+ * need to add native functions
+ * — callable from Lox but implemented in C
+ * — that expose those capabilities. */
+typedef Value (*NativeFn)(int argCount, Value* args);
+
+/* The representation is simpler than ObjFunction
+ * — merely an Obj header and a pointer to the C function
+ * that implements the native behavior.
+ * The native function takes the argument count
+ * and a pointer to the first argument on the stack.
+ * It accesses the arguments through that pointer.
+ * Once it’s done, it returns the result value. */
+typedef struct {
+    Obj obj;
+    NativeFn function;
+} ObjNative;
 
 struct ObjString {
     /* Because ObjString is an Obj, 
@@ -44,6 +84,8 @@ struct ObjString {
     uint32_t hash;
 };
 
+ObjFunction* newFunction();
+ObjNative* newNative(NativeFn function);
 ObjString* takeString(char* chars, int length);
 ObjString* copyString(const char* chars, int length);
 

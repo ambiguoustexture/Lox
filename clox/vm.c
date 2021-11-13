@@ -1,6 +1,7 @@
 #include <stdio.h>
 #include <stdarg.h>
 #include <string.h>
+#include <time.h>
 
 #include "common.h"
 #include "compiler.h"
@@ -11,42 +12,70 @@
 
 VM vm;
 
-static void resetStack() 
+static Value clockNative(int argCount, Value* args)
+{
+    return NUMBER_VAL((double)clock() / CLOCKS_PER_SEC);
+}
+
+static void resetStack()
 {
     /*
-     * The only initialization needed 
-     * is to set stackTop to point to the beginning of the array 
+     * The only initialization needed
+     * is to set stackTop to point to the beginning of the array
      * to indicate that the stack is empty.
      */
     vm.stackTop = vm.stack;
+    /* When the VM starts up, the CallFrame stack is empty. */
+    vm.frameCount = 0;
 }
 
 static void runtimeError(const char* format, ...)
 {
-    /* Using variadic functions: 
+    /* Using variadic functions:
      * ones that take a varying number of arguments.
-     * The ... and va_list stuff let us 
-     * pass an arbitrary number of arguments to runtimeError(). 
-     * It forwards those on to vfprintf(), 
+     * The ... and va_list stuff let us
+     * pass an arbitrary number of arguments to runtimeError().
+     * It forwards those on to vfprintf(),
      * which is the flavor of printf() that takes an explicit va_list. */
+
     va_list args;
     va_start(args, format);
     vfprintf(stderr, format, args);
     va_end(args);
     fputs("\n", stderr);
 
-    /* Look into the chunk’s debug line array 
-     * using the current bytecode instruction index minus one. 
-     * That’s because the interpreter advances 
-     * past each instruction before executing it. */
-    size_t instruction = vm.ip - vm.chunk->code - 1;
-    int line = vm.chunk->lines[instruction];
-    fprintf(stderr, "[line %d] in script\n", line);
+    for (int i = vm.frameCount - 1; i >= 0; i--) {
+        CallFrame* frame = &vm.frames[i];
+        ObjFunction* function = frame->function;
+        // -1 because the IP is sitting on the next instruction to be executed.
+        size_t instruction = frame->ip - function->chunk.code - 1;
+        fprintf(stderr, "[line %d] in ",
+                function->chunk.lines[instruction]);
+        if (function->name == NULL) {
+            fprintf(stderr, "script\n");
+        } else {
+            fprintf(stderr, "%s()\n", function->name->chars);
+        }
+    }
 
     resetStack();
 }
 
-void initVM() 
+static void defineNative(const char* name, NativeFn function)
+{
+    /* It takes a pointer to a C function
+     * and the name it will be known as in Lox.
+     * Wrap the function in an ObjNative
+     * and then store that in a global variable with the given name. */
+
+    push(OBJ_VAL(copyString(name, (int)strlen(name))));
+    push(OBJ_VAL(newNative(function)));
+    tableSet(&vm.globals, AS_STRING(vm.stack[0]), vm.stack[1]);
+    pop();
+    pop();
+}
+
+void initVM()
 {
     resetStack();
 
@@ -57,26 +86,28 @@ void initVM()
 
     /* When spin up a new VM, the string table is empty. */
     initTable(&vm.strings);
+
+    defineNative("clock", clockNative);
 }
 
-void freeVM() 
+void freeVM()
 {
     freeTable(&vm.globals);
-    
+
     /* When shut down the VM, clean up any resources used by the table. */
     freeTable(&vm.strings);
-    
+
     /* Once the program is done, free every object. */
-    freeObjects();   
+    freeObjects();
 }
 
-void push(Value value) 
+void push(Value value)
 {
     /*
      * Stores value in the array element at the top of the stack.
-     * This stores the value in that slot. 
-     * Then increment the pointer itself 
-     * to point to the next unused slot in the array 
+     * This stores the value in that slot.
+     * Then increment the pointer itself
+     * to point to the next unused slot in the array
      * now that the previous slot is occupied.
      */
     *vm.stackTop = value;
@@ -85,23 +116,87 @@ void push(Value value)
 
 Value pop()
 {
-    /* First, move the stack pointer back 
-     * to get to the most recent used slot in the array. 
-     * Then look up the value at that index and return it. 
-     * Don’t need to explicitly “remove” it from the array 
-     * —— moving stackTop down is enough 
+    /* First, move the stack pointer back
+     * to get to the most recent used slot in the array.
+     * Then look up the value at that index and return it.
+     * Don’t need to explicitly “remove” it from the array
+     * —— moving stackTop down is enough
      * to mark that slot as no longer in use. */
     vm.stackTop--;
     return *vm.stackTop;
 }
 
-static Value peek(int distance) 
+static Value peek(int distance)
 {
-    /* It returns a value from the stack but doesn’t pop it. 
-     * The distance argument is how far 
-     * down from the top of the stack to look: 
+    /* It returns a value from the stack but doesn’t pop it.
+     * The distance argument is how far
+     * down from the top of the stack to look:
      * zero is the top, one is one slot down, etc. */
     return vm.stackTop[-1 - distance];
+}
+
+static bool call(ObjFunction* function, int argCount)
+{
+    if (argCount != function->arity) {
+        runtimeError("Expected %d arguments but got %d.",
+                function->arity, argCount);
+        return false;
+    }
+
+    if (vm.frameCount == FRAMES_MAX) {
+        runtimeError("Stack overflow.");
+        return false;
+    }
+
+    /* This simply initializes the next CallFrame on the stack.
+     * It stores a pointer to the function being called
+     * and points the frame’s ip to the beginning of the function’s bytecode.
+     * Finally, it sets up the slots pointer
+     * to give the frame its window into the stack.
+     * The arithmetic there ensures
+     * that the arguments already on the stack line up
+     * with the function’s parameters. */
+    CallFrame* frame = &vm.frames[vm.frameCount++]; {
+        frame->function = function;
+        frame->ip       = function->chunk.code;
+
+        /* The funny little - 1 is to skip over local slot zero,
+         * which contains the function being called. */
+        frame->slots = vm.stackTop - argCount - 1;
+    }
+
+    return true;
+}
+
+static bool callValue(Value callee, int argCount)
+{
+    if (IS_OBJ(callee)) {
+        switch (OBJ_TYPE(callee)) {
+            case OBJ_FUNCTION:
+                return call(AS_FUNCTION(callee), argCount);
+
+            case OBJ_NATIVE: {
+                /* If the object being called is a native function,
+                 * invoke the C function right then and there.
+                 * There’s no need to muck with CallFrames or anything.
+                 * Iust hand off to C,
+                 * get the result and stuff it back in the stack.
+                 * This makes native functions as fast as we can get. */
+                NativeFn native = AS_NATIVE(callee);
+                Value result = native(argCount, vm.stackTop - argCount);
+                vm.stackTop -= argCount + 1;
+                push(result);
+                return true;
+            }
+
+            default:
+                // Non-callable object type.
+                break;
+        }
+    }
+
+    runtimeError("Can only call functions and classes.");
+    return false;
 }
 
 static bool isFalsey(Value value)
@@ -109,19 +204,19 @@ static bool isFalsey(Value value)
     return IS_NIL(value) || (IS_BOOL(value) && !AS_BOOL(value));
 }
 
-static void concatenate() 
+static void concatenate()
 {
-    /* First, calculate the length of the result string 
-     * based on the lengths of the operands. 
-     * Allocate a character array for the result 
-     * and then copy the two halves in. 
+    /* First, calculate the length of the result string
+     * based on the lengths of the operands.
+     * Allocate a character array for the result
+     * and then copy the two halves in.
      * As always, carefully ensure the string is terminated.
      */
     ObjString* b = AS_STRING(pop());
     ObjString* a = AS_STRING(pop());
 
     int length = a->length + b->length;
-    char* chars = ALLOCATE(chars, length + 1);
+    char* chars = ALLOCATE(char, length + 1);
     memcpy(chars, a->chars, a->length);
     memcpy(chars + a->length, b->chars, b->length);
     chars[length] = '\0';
@@ -132,43 +227,27 @@ static void concatenate()
 
 static InterpretResult run()
 {
-/*
- * To process an instruction, 
- * first figure out what kind of instruction dealing with. 
- *
- * The READ_BYTE() macro reads the byte currently pointed at 
- * by ip and then advances the instruction pointer. 
- *
- * The first byte of any instruction is the opcode. 
- * Given a numeric opcode, need to get to the right C code 
- * that implements that instruction’s semantics. 
- * This process is called decoding or dispatching the instruction.
- */
-#define READ_BYTE() (*vm.ip++)
+    /* First, store the current topmost CallFrame in a local variable
+     * inside the main bytecode execution function.
+     * Then replace the bytecode access macros with versions
+     * that access ip through that variable. */
+    CallFrame* frame = &vm.frames[vm.frameCount - 1];
 
-/* 
- * READ_CONSTANT() 
- * reads the next byte from the bytecode, 
- * treats the resulting number as an index, 
- * and looks up the corresponding Value in the chunk’s constant table.
- */
-#define READ_CONSTANT() (vm.chunk->constants.values[READ_BYTE()])
+#define READ_BYTE() (*frame->ip++)
+#define READ_SHORT() \
+    (frame->ip += 2, \
+     (uint16_t)((frame->ip[-2] << 8) | frame->ip[-1]))
+#define READ_CONSTANT() \
+    (frame->function->chunk.constants.values[READ_BYTE()])
 
-/* Reads a one-byte operand from the bytecode chunk. 
- * It treats that as an index into the chunk’s constant table 
- * and returns the string at that index. 
- * It doesn’t check that the value is a string 
- * — it just indiscriminately casts it. 
- * That’s safe because the compiler never emits an instruction 
- * that refers to a non-string constant. */
 #define READ_STRING() AS_STRING(READ_CONSTANT())
 
-/*  First, check that the two operands are both numbers. 
- *  If either isn’t, report a runtime error and yank the ejection seat lever. 
+/*  First, check that the two operands are both numbers.
+ *  If either isn’t, report a runtime error and yank the ejection seat lever.
  *
- *  If the operands are fine, 
- *  pop them both and unwrap them. 
- *  Then apply the given operator, wrap the result, 
+ *  If the operands are fine,
+ *  pop them both and unwrap them.
+ *  Then apply the given operator, wrap the result,
  *  and push it back on the stack.
  */
 #define BINARY_OP(valueType, op) \
@@ -183,13 +262,13 @@ static InterpretResult run()
     } while (false);
 
     for (;;) {
-#ifdef DEBUG_TRACE_EXECUTION 
+#ifdef DEBUG_TRACE_EXECUTION
         {
         /*
-         * Loop, printing each value in the array, 
-         * starting at the first (bottom of the stack) and 
-         * ending when reach the top. 
-         * This lets us observe the effect of each instruction on the stack. 
+         * Loop, printing each value in the array,
+         * starting at the first (bottom of the stack) and
+         * ending when reach the top.
+         * This lets us observe the effect of each instruction on the stack.
          */
         printf("          ");
         for (Value* slot = vm.stack; slot < vm.stackTop; slot++) {
@@ -201,21 +280,19 @@ static InterpretResult run()
         }
 
         {
-        /*
-         * Since disassembleInstruction() takes an integer byte offset 
-         * and store the current instruction reference as a direct pointer, 
-         * First do a little pointer math to convert ip 
-         * back to a relative offset from the beginning of the bytecode. 
-         * Then disassemble the instruction that begins at that byte.
-         */
-        disassembleInstruction(vm.chunk, (int)(vm.ip - vm.chunk->code));
+        /* Instead of passing in the VM’s chunk and ip fields,
+         * now read from the current CallFrame. */
+        disassembleInstruction(&frame->function->chunk,
+                (int)(frame->ip - frame->function->chunk.code));
         }
+
 #endif
         /*
-         * An outer loop that goes and goes. 
-         * Each turn through that loop, 
+         * An outer loop that goes and goes.
+         * Each turn through that loop,
          * we read and execute a single bytecode instruction.
          */
+
         uint8_t instruction;
         switch (instruction = READ_BYTE()) {
             case OP_CONSTANT: {
@@ -223,55 +300,58 @@ static InterpretResult run()
                 push(constant);
                 break;
             }
-            
+
             /* Since parsePrecedence() has already consumed the keyword token,
              * all need to do is output the proper instruction.
              * Figure that out based on the type of token we parsed. */
             case OP_NIL:      push(NIL_VAL);            break;
             case OP_TRUE:     push(BOOL_VAL(true));     break;
             case OP_FALSE:    push(BOOL_VAL(false));    break;
-            /* As the name implies, 
-             * that `OP_POP` instruction pops the top value off the stack 
+            /* As the name implies,
+             * that `OP_POP` instruction pops the top value off the stack
              * and forgets it */
             case OP_POP:      pop();                    break;
 
             case OP_GET_LOCAL: {
-                /* It takes a single byte operand for the stack slot 
-                 * where the local lives. 
-                 * It loads the value from that index and 
-                 * then pushes it on top of the stack 
+                /* It takes a single byte operand for the stack slot
+                 * where the local lives.
+                 * It loads the value from that index and
+                 * then pushes it on top of the stack
                  * where later instructions can find it. */
                 uint8_t slot = READ_BYTE();
-                push(vm.stack[slot]);
-                break;                
+                /* Accesses the current frame’s slots array,
+                 * which means it accesses the given numbered slot
+                 * relative to the beginning of that frame. */
+                push(frame->slots[slot]);
+                break;
             }
 
             case OP_SET_LOCAL: {
-                /* It takes the assigned value from the top of the stack and 
-                 * stores it in the stack slot corresponding 
-                 * to the local variable. 
-                 * Note that it doesn’t pop the value from the stack. 
-                 * Remember, assignment is an expression, 
-                 * and every expression produces a value. 
-                 * The value of an assignment expression 
-                 * is the assigned value itself, 
+                /* It takes the assigned value from the top of the stack and
+                 * stores it in the stack slot corresponding
+                 * to the local variable.
+                 * Note that it doesn’t pop the value from the stack.
+                 * Remember, assignment is an expression,
+                 * and every expression produces a value.
+                 * The value of an assignment expression
+                 * is the assigned value itself,
                  * so the VM just leaves the value on the stack. */
                 uint8_t slot = READ_BYTE();
-                vm.stack[slot] = peek(0);
+                frame->slots[slot] = peek(0);
                 break;
             }
-    
+
             case OP_GET_GLOBAL: {
-                /* Pull the constant table index 
-                 * from the instruction’s operand and 
-                 * get the variable name. 
-                 * Then use that as a key to look up the variable’s value 
-                 * in the globals hash table. 
+                /* Pull the constant table index
+                 * from the instruction’s operand and
+                 * get the variable name.
+                 * Then use that as a key to look up the variable’s value
+                 * in the globals hash table.
                  *
-                 * If the key isn’t present in the hash table, 
-                 * it means that global variable has never been defined. 
-                 * That’s a runtime error in Lox, 
-                 * so report it and exit the interpreter loop if that happens. 
+                 * If the key isn’t present in the hash table,
+                 * it means that global variable has never been defined.
+                 * That’s a runtime error in Lox,
+                 * so report it and exit the interpreter loop if that happens.
                  * Otherwise, take the value and push it onto the stack. */
                 ObjString* name = READ_STRING();
                 Value value;
@@ -280,21 +360,21 @@ static InterpretResult run()
                     return INTERPRET_RUNTIME_ERROR;
                 }
                 push(value);
-                break;                     
+                break;
             }
-            
+
             case OP_DEFINE_GLOBAL: {
-                /* Get the name of the variable from the constant table. 
-                 * Then take the value from the top of the stack and 
-                 * store it in a hash table with that name as the key. 
+                /* Get the name of the variable from the constant table.
+                 * Then take the value from the top of the stack and
+                 * store it in a hash table with that name as the key.
                  *
-                 * This code doesn’t check to see 
-                 * if the key is already in the table. 
-                 * Lox is pretty lax with global variables and 
-                 * lets you redefine them without error. 
-                 * That’s useful in a REPL session, 
-                 * so the VM supports that 
-                 * by simply overwriting the value 
+                 * This code doesn’t check to see
+                 * if the key is already in the table.
+                 * Lox is pretty lax with global variables and
+                 * lets you redefine them without error.
+                 * That’s useful in a REPL session,
+                 * so the VM supports that
+                 * by simply overwriting the value
                  * if the key happens to already be in the hash table. */
                 ObjString* name = READ_STRING();
                 tableSet(&vm.globals, name, peek(0));
@@ -303,8 +383,8 @@ static InterpretResult run()
             }
 
             case OP_SET_GLOBAL: {
-                /*  If the variable hasn’t been defined yet, 
-                 *  it’s a runtime error to try to assign to it. 
+                /*  If the variable hasn’t been defined yet,
+                 *  it’s a runtime error to try to assign to it.
                  *  Lox doesn’t do implicit variable declaration. */
                 ObjString* name = READ_STRING();
                 if (tableSet(&vm.globals, name, peek(0))) {
@@ -324,11 +404,11 @@ static InterpretResult run()
 
             case OP_GREATER:  BINARY_OP(BOOL_VAL,   >); break;
             case OP_LESS:     BINARY_OP(BOOL_VAL,   <); break;
-            
+
             case OP_ADD: {
-                /* If both operands are strings, it concatenates. 
-                 * If they’re both numbers, it adds them. 
-                 * Any other combination of operand types 
+                /* If both operands are strings, it concatenates.
+                 * If they’re both numbers, it adds them.
+                 * Any other combination of operand types
                  * is a runtime error. */
                 if (IS_STRING(peek(0)) && IS_STRING(peek(1))) {
                     concatenate();
@@ -338,22 +418,22 @@ static InterpretResult run()
                     push(NUMBER_VAL(a + b));
                 } else {
                     runtimeError(
-                        "Opreands must be two numbers or two strings.");
+                        "Operands must be two numbers or two strings.");
                     return INTERPRET_RUNTIME_ERROR;
                 }
                 break;
-            } 
+            }
             case OP_SUBTRACT: BINARY_OP(NUMBER_VAL, -); break;
             case OP_MULTIPLY: BINARY_OP(NUMBER_VAL, *); break;
             case OP_DIVIDE:   BINARY_OP(NUMBER_VAL, /); break;
             case OP_NOT:      push(BOOL_VAL(isFalsey(pop()))); break;
             case OP_NEGATE: {
-                /* First, check to see if the value on top of the stack 
-                 * is a number. 
-                 * If it’s not, report the runtime error and 
-                 * stop the interpreter. 
-                 * Otherwise, keep going. 
-                 * Only after this validation do unwrap the operand, 
+                /* First, check to see if the value on top of the stack
+                 * is a number.
+                 * If it’s not, report the runtime error and
+                 * stop the interpreter.
+                 * Otherwise, keep going.
+                 * Only after this validation do unwrap the operand,
                  * negate it, wrap the result and push it.
                  */
                 if (!IS_NUMBER(peek(0))) {
@@ -364,7 +444,7 @@ static InterpretResult run()
                 push(NUMBER_VAL(-AS_NUMBER(pop())));
                 break;
             }
-            
+
             case OP_PRINT: {
                 printValue(pop());
                 printf("\n");
@@ -372,42 +452,119 @@ static InterpretResult run()
             }
 
             case OP_RETURN: {
-                // Exit interpreter.
-                return INTERPRET_OK;                    
+                /* When a function returns a value,
+                 * that value will be on top of the stack.
+                 * About to discard the called function’s entire stack window,
+                 * so pop that return value off and hang on to it.
+                 * Then discard the CallFrame for the returning function.
+                 * If that was the very last CallFrame,
+                 * it means have finished executing the top level code.
+                 * The entire program is done,
+                 * so pop the main script function from the stack
+                 * and then exit the interpreter.
+                 *
+                 * Otherwise, discard all of the slots the callee was using
+                 * for its parameters and local variables.
+                 * That includes the same slots
+                 * the caller used to pass the arguments.
+                 * Now that the call is done,
+                 * the caller doesn’t need them anymore.
+                 * This means the top of the stack ends up
+                 * right at the beginning
+                 * of the returning function’s stack window.
+                 *
+                 * Push the return value back onto the stack
+                 * at that new lower location.
+                 * Then update the run() function’s cached pointer
+                 * to the current frame.
+                 * Just like when began a call,
+                 * on the next iteration of the bytecode dispatch loop,
+                 * the VM will read ip from that frame
+                 * and execution will jump back to the caller,
+                 * right where it left off immediately
+                 * after the OP_CALL instruction. */
+                Value result = pop();
+
+                vm.frameCount--;
+                if (vm.frameCount == 0) {
+                    pop();
+                    return INTERPRET_OK;
+                }
+
+                vm.stackTop = frame->slots;
+                push(result);
+
+                frame = &vm.frames[vm.frameCount - 1];
+                break;
+            }
+
+            case OP_JUMP: {
+                /* The jump instructions used to modify the VM’s ip field.
+                 * Now, they do the same for the current frame’s ip. */
+                uint16_t offset = READ_SHORT();
+                frame->ip += offset;
+                break;
+            }
+
+            case OP_JUMP_IF_FALSE: {
+                /*  */
+                uint16_t offset = READ_SHORT();
+                if (isFalsey(peek(0))) frame->ip += offset;
+                break;
+            }
+
+            case OP_LOOP: {
+                uint16_t offset = READ_SHORT();
+                frame->ip -= offset;
+                break;
+            }
+
+            case OP_CALL: {
+                int argCount = READ_BYTE();
+                if (!callValue(peek(argCount), argCount)) {
+                    return INTERPRET_RUNTIME_ERROR;
+                }
+                frame = &vm.frames[vm.frameCount - 1];
+                break;
             }
         }
     }
 
 #undef READ_BYTE
+#undef READ_SHORT
 #undef READ_CONSTANT
 #undef READ_STRING
 #undef BINARY_OP
-}   
+}
 
 InterpretResult interpret(const char* source)
 {
-    /*
-     * Create a new empty chunk and pass it over to the compiler. 
-     * The compiler will take the user’s program and 
-     * fill up the chunk with bytecode. 
-     * At least, that’s what it will do 
-     * if the program doesn’t have any compile errors. 
-     * If it does encounter an error, 
-     * compile() returns false and discard the unusable chunk.
-     */
-    Chunk chunk;
-    initChunk(&chunk);
+    /* First, pass the source code to the compiler.
+     * It returns a new ObjFunction containing the compiled top-level code.
+     * If get NULL back, it means there was some compile-time error
+     * which the compiler has already reported.
+     * In that case, bail out since can’t run anything.
+     *
+     * Otherwise, store the function on the stack
+     * and prepare an initial CallFrame to execute its code.
+     * Now can see why the compiler sets aside stack slot zero
+     * — that stores the function being called.
+     * In the new CallFrame, point to the function,
+     * initialize its ip to point to the beginning of the function’s bytecode,
+     * and set up its stack window to start at the very bottom
+     * of the VM’s value stack. */
+    ObjFunction* function = compile(source);
+    if (function == NULL) return INTERPRET_COMPILE_ERROR;
 
-    if (!compile(source, &chunk)) {
-        freeChunk(&chunk);
-        return INTERPRET_COMPILE_ERROR;
-    }
+    push(OBJ_VAL(function));
+    /* Now that have a handy function for initiating a CallFrame,
+     * may as well use it to set up the first frame
+     * for executing the top level code. */
+    call(function, 0);
 
-    vm.chunk = &chunk;
-    vm.ip = vm.chunk->code;
-
-    InterpretResult result = run();
-
-    freeChunk(&chunk);
-    return result;
+    /* After finishing, the VM used to free the hardcoded chunk.
+     * Now that the ObjFunction owns that code,
+     * don’t need to do that anymore,
+     * so the end of interpret() is simply. */
+    return run();
 }

@@ -17,7 +17,7 @@ typedef struct {
     bool panicMode;
 } Parser;
 
-/* In order to take the “precedence” as a parameter, 
+/* In order to take the “precedence” as a parameter.
  * define it numerically. */
 typedef enum {
     /* These are all of Lox’s precedence levels 
@@ -62,7 +62,27 @@ typedef struct {
     int depth;
 } Local;
 
-typedef struct {
+typedef enum {
+    /* A little FunctionType enum.
+     * This lets the compiler tell when it’s compiling top level code
+     * versus the body of a function. */
+    TYPE_FUNCTION,
+    TYPE_SCRIPT
+} FunctionType;
+
+typedef struct Compiler {
+    /* Unlike the Value and CallFrame stacks in the VM,
+     * won’t use an array. Instead, use a linked list.
+     * Each Compiler points back to the Compiler for the function
+     * that encloses it, all the way back to the root Compiler
+     * for the top level code. */
+    struct Compiler* enclosing;
+    /* To support that implicit top-level function.
+     * Instead of pointing directly to a Chunk that the compiler writes to,
+     * it will instead have a reference to the function object being built. */
+    ObjFunction* function;
+    FunctionType type;
+
     /* A simple flat array of all locals 
      * that are in scope during each point in the compilation process. 
      * All ordered in the array in the order 
@@ -85,7 +105,9 @@ Chunk* compilingChunk;
 
 static Chunk* currentChunk()
 {
-    return compilingChunk;
+    /* The current chunk is always the chunk owned by the function
+     * we’re in the middle of compiling. */
+    return &current->function->chunk;
 }
 
 static void errorAt(Token* token, const char* message)
@@ -114,7 +136,7 @@ static void errorAt(Token* token, const char* message)
     parser.hadError = true;
 }
 
-static void error(const char* message) 
+static void error(const char* message)
 {
     errorAt(&parser.previous, message);
 }
@@ -198,7 +220,29 @@ static void emitBytes(uint8_t byte1, uint8_t byte2)
     emitByte(byte2);
 }
 
-static void emitReturn() { emitByte(OP_RETURN); }
+static void emitLoop(int loopStart) {
+    emitByte(OP_LOOP);
+
+    int offset = currentChunk()->count - loopStart + 2;
+    if (offset > UINT16_MAX) error("Loop body too large.");
+
+    emitByte((offset >> 8) & 0xff);
+    emitByte(offset & 0xff);
+}
+
+static int emitJump(uint8_t instruction) 
+{
+    emitByte(instruction);
+    emitByte(0xff);
+    emitByte(0xff);
+    return currentChunk()->count - 2;
+}
+
+static void emitReturn()
+{
+    emitByte(OP_NIL);
+    emitByte(OP_RETURN);
+}
 
 static uint8_t makeConstant(Value value) 
 {
@@ -220,30 +264,99 @@ static uint8_t makeConstant(Value value)
     return (uint8_t)constant;
 }
 
-static void emitConstant(Value value) 
-{ 
+static void emitConstant(Value value)
+{
     /*
      * First, add the value to the constant table, 
      * then emit an OP_CONSTANT instruction 
      * that pushes it onto the stack at runtime. */
-    emitBytes(OP_CONSTANT, makeConstant(value)); 
+    emitBytes(OP_CONSTANT, makeConstant(value));
 }
 
-static void initCompiler(Compiler* compiler)
+static void patchJump(int offset)
 {
+    // -2 to adjust for the bytecode for the jump offset itself.
+    int jump = currentChunk()->count - offset - 2;
+
+    if (jump > UINT16_MAX) {
+      error("Too much code to jump over.");
+    }
+
+    currentChunk()->code[offset] = (jump >> 8) & 0xff;
+    currentChunk()->code[offset + 1] = jump & 0xff;
+}
+
+static void initCompiler(Compiler* compiler, FunctionType type)
+{
+    /* When initializing a new Compiler,
+     * capture the about-to-no-longer-be-current one in that pointer. */
+    compiler->enclosing = current;
+
+    /* A function object is the runtime representation of a function,
+     * but here are creating it at compile time.
+     * The way to think of it is that
+     * a function is similar to string and number literals.
+     * It forms a bridge between the compile time and runtime world.
+     * When get to function declarations,
+     * those really are literals — they are a notation that
+     * produces values of a built-in type.
+     * So the compiler creates function objects during compilation.
+     * Then, at runtime, they are simply invoked. */
+
+    /* First, clear out the new Compiler fields. */
+    compiler->function = NULL;
+    compiler->type     = type;
+
     compiler->localCount = 0;
     compiler->scopeDepth = 0;
+
+    /* Then allocate a new function object to compile into. */
+    compiler->function = newFunction();
+
     current = compiler;
+
+    if (type != TYPE_SCRIPT) {
+        current->function->name = copyString(parser.previous.start,
+                parser.previous.length);
+    }
+
+    /* Remember that the compiler’s locals array keeps track of
+     * which stack slots are associated
+     * with which local variables or temporaries.
+     * From now on, the compiler implicitly claims stack slot zero
+     * for the VM’s own internal use.
+     * Give it an empty name so that the user can’t write an identifier
+     * that refers to it. */
+    Local* local = &current->locals[current->localCount++]; {
+        local->depth = 0;
+        local->name.start  = "";
+        local->name.length = 0;
+    }
 }
 
-static void endCompiler() 
+static ObjFunction* endCompiler()
 { 
     emitReturn(); 
+    /* Previously, when interpret() called into the compiler,
+     * it passed in a Chunk to be written to.
+     * Now that the compiler creates the function object itself,
+     * return that function. Grab it from the current compiler */
+    ObjFunction* function = current->function;
+
 #ifdef DEBUG_PRINT_CODE
     if (!parser.hadError) {
-        disassembleChunk(currentChunk(), "code");
+        disassembleChunk(currentChunk(), function->name != NULL ?
+                function->name->chars : "<script>");
     }
 #endif 
+
+    /* Then when a Compiler finishes,
+     * it pops itself off the stack
+     * by restoring the previous compiler as the current one. */
+    current = current->enclosing;
+
+    /* And then return it to the previous `compile()`. */
+    return function;
 }
 
 static void beginScope() 
@@ -282,7 +395,7 @@ static void expression();
 static void statement();
 static void declaration();
 static ParseRule* getRule(TokenType type);
-static void parsePrecedence(Precedence precedence); 
+static void parsePrecedence(Precedence precedence);
 
 static uint8_t identifierConstant(Token* name) 
 {
@@ -304,7 +417,7 @@ static bool identifiersEqual(Token* a, Token* b)
      * If the lengths are the same, 
      * check the characters using memcmp(). */
     if (a->length != b->length) return false;
-    return memcmp(a->start, b->start, a->length);
+    return memcmp(a->start, b->start, a->length) == 0;
 }
 
 static int resolveLocal(Compiler* compiler, Token* name)
@@ -361,9 +474,11 @@ static void addLocal(Token name)
          * that owns the variable. */
         local->name = name;
         /* Splitting a variable’s declaration into two phases. */
-        local->depth = 1; 
+        local->depth = -1;
     }
 }
+
+
 
 static void declareVariable()
 {
@@ -393,12 +508,32 @@ static void declareVariable()
         }
 
         if (identifiersEqual(name, &local->name)) {
-            error("Already variable with this name in this scope.");
+            error("Already a variable with this name in this scope.");
         }
     }
 
     addLocal(*name);
 }
+
+static uint8_t argumentList()
+{
+    /* Each argument expression generates code 
+     * which leaves its value on the stack in preparation for the call.  */
+    uint8_t argCount = 0;
+    if (!check(TOKEN_RIGHT_PAREN)) {
+        do {
+            expression();
+            if (argCount == 255) {
+                error("Can't have more than 255 arguments.");
+            }
+            argCount++;
+        } while (match(TOKEN_COMMA));
+    }
+
+    consume(TOKEN_RIGHT_PAREN, "Expect ')' after arguments.");
+    return argCount;
+}
+
 
 static void binary(bool canAssign) 
 {
@@ -438,6 +573,11 @@ static void binary(bool canAssign)
             return; // Unreachable.
     }
 
+}
+
+static void call(bool canAssign) {
+    uint8_t argCount = argumentList();
+    emitBytes(OP_CALL, argCount);
 }
 
 static void literal(bool canAssign)
@@ -514,6 +654,26 @@ static void namedVariable(Token name, bool canAssign)
     }
 }
 
+static void and_(bool canAssign)
+{
+    int endJump = emitJump(OP_JUMP_IF_FALSE);
+
+    emitByte(OP_POP);
+    parsePrecedence(PREC_AND);
+
+    parsePrecedence(PREC_AND);
+}
+
+static void or_(bool canAssign)
+{
+    int elseJump = emitJump(OP_JUMP_IF_FALSE);
+    int endJump = emitJump(OP_JUMP);
+    patchJump(elseJump);
+    emitByte(OP_POP);
+    parsePrecedence(PREC_OR);
+    patchJump(endJump);
+}
+
 static void variable(bool canAssign)
 {
     namedVariable(parser.previous, canAssign);
@@ -538,7 +698,7 @@ static void unary(bool canAssign)
 ParseRule rules[] = {
     /* The table that drives the whole parser 
      * is an array of ParseRules. */
-    [TOKEN_LEFT_PAREN]    = {grouping, NULL,   PREC_NONE},
+    [TOKEN_LEFT_PAREN]    = {grouping, call,   PREC_CALL},
     [TOKEN_RIGHT_PAREN]   = {NULL,     NULL,   PREC_NONE},
     [TOKEN_LEFT_BRACE]    = {NULL,     NULL,   PREC_NONE},
     [TOKEN_RIGHT_BRACE]   = {NULL,     NULL,   PREC_NONE},
@@ -560,7 +720,7 @@ ParseRule rules[] = {
     [TOKEN_IDENTIFIER]    = {variable, NULL,   PREC_NONE},
     [TOKEN_STRING]        = {string,   NULL,   PREC_NONE},
     [TOKEN_NUMBER]        = {number,   NULL,   PREC_NONE},
-    [TOKEN_AND]           = {NULL,     NULL,   PREC_NONE},
+    [TOKEN_AND]           = {NULL,     and_,   PREC_AND},
     [TOKEN_CLASS]         = {NULL,     NULL,   PREC_NONE},
     [TOKEN_ELSE]          = {NULL,     NULL,   PREC_NONE},
     [TOKEN_FALSE]         = {literal,  NULL,   PREC_NONE},
@@ -568,7 +728,7 @@ ParseRule rules[] = {
     [TOKEN_FUN]           = {NULL,     NULL,   PREC_NONE},
     [TOKEN_IF]            = {NULL,     NULL,   PREC_NONE},
     [TOKEN_NIL]           = {literal,  NULL,   PREC_NONE},
-    [TOKEN_OR]            = {NULL,     NULL,   PREC_NONE},
+    [TOKEN_OR]            = {NULL,     or_,    PREC_OR},
     [TOKEN_PRINT]         = {NULL,     NULL,   PREC_NONE},
     [TOKEN_RETURN]        = {NULL,     NULL,   PREC_NONE},
     [TOKEN_SUPER]         = {NULL,     NULL,   PREC_NONE},
@@ -648,6 +808,10 @@ static uint8_t parseVariable(const char* errorMessage)
 
 static void markInitialized()
 {
+    /* A top level function declaration will also call this function.
+     * When that happens, there is no local variable to mark initialized
+     * — the function is bound to a global variable. */
+    if (current->scopeDepth == 0) return ;
     /* So this is really what “declaring” and “defining” a variable 
      * means in the compiler. 
      * “Declaring” is when it’s added to the scope, 
@@ -687,24 +851,24 @@ static ParseRule* getRule(TokenType type)
      * It’s called by binary() 
      * to look up the precedence of the current operator. 
      * This function exists solely to handle a declaration cycle 
-     * in the C code. 
-     * binary() is defined before the rules table 
-     * so that the table can store a pointer to it. 
+     * in the C code.
+     * binary() is defined before the rules table
+     * so that the table can store a pointer to it.
      * That means the body of binary() cannot access the table directly. */
     return &rules[type];
 }
 
 /* The missing piece in the middle that connects those together. */
-static void expression() 
+static void expression()
 {
     parsePrecedence(PREC_ASSIGNMENT);
 }
 
 static void block()
 {
-    /* Keeps parsing declarations and statements 
-     * until it hits the closing brace. 
-     * As do with any loop in the parser, 
+    /* Keeps parsing declarations and statements
+     * until it hits the closing brace.
+     * As do with any loop in the parser,
      * also check for the end of the token stream. */
     while (!check(TOKEN_RIGHT_BRACE) && !check(TOKEN_EOF)) {
         declaration();
@@ -713,16 +877,80 @@ static void block()
     consume(TOKEN_RIGHT_BRACE, "Expect '}' after block.");
 }
 
+static void function(FunctionType type)
+{
+    /* The Compiler struct stores data
+     * like which slots are owned by which local variables,
+     * how many blocks of nesting currently in, etc.
+     * All of that is specific to a single function.
+     *
+     * When start compiling a function declaration,
+     * create a new Compiler on the C stack and initialize it. */
+    Compiler compiler;
+    initCompiler(&compiler, type);
+    beginScope();
+
+    // Compile the parameter list.
+    consume(TOKEN_LEFT_PAREN, "Expect '(' after function name.");
+    /* Functions aren’t very useful if can’t pass arguments to them.
+     * Semantically, a parameter is simply a local variable
+     * declared in the outermost lexical scope of the function body.
+     * Get to use the existing compiler support
+     * for declaring named local variables to parse and compile parameters.
+     * Unlike local variables which have initializers,
+     * there’s no code here to initialize the parameter’s value. */
+    if (!check(TOKEN_RIGHT_PAREN)) {
+        do {
+            current->function->arity++;
+            if (current->function->arity > 255) {
+                errorAtCurrent("Can't have more than 255 parameters.");
+            }
+
+            uint8_t paramConstant = parseVariable("Expect parameter name.");
+            defineVariable(paramConstant);
+        } while (match(TOKEN_COMMA));
+    }
+    consume(TOKEN_RIGHT_PAREN, "Expect ')' after parameters.");
+    // The body.
+    consume(TOKEN_LEFT_BRACE,  "Expect '{' before function body.");
+    block();
+    // Create the function object.
+    ObjFunction* function = endCompiler();
+    emitBytes(OP_CONSTANT, makeConstant(OBJ_VAL(function)));
+}
+
+static void funDeclaration()
+{
+    /* Functions are first class values
+     * and a function declaration simply creates and stores one
+     * in a newly-declared variable.
+     * So parse the name just like any other variable declaration.
+     * A function declaration at the top level
+     * will bind the function to a global variable.
+     * Inside a block or other function,
+     * a function declaration creates a local variable. */
+    uint8_t global = parseVariable("Expect function name.");
+    markInitialized();
+    function(TYPE_FUNCTION);
+    defineVariable(global);
+    /* It’s safe for a function to refer to its own name inside its body.
+     * One can’t call the function and execute the body
+     * until after it’s fully defined,
+     * so one will never see the variable in an uninitialized state.
+     * Practically speaking, it’s useful to allow this
+     * in order to support recursive local functions. */
+}
+
 static void varDeclaration()
 {
     uint8_t global = parseVariable("Expect variable name.");
 
-    /* The keyword is followed by the variable name. 
-     * That’s compiled by parseVariable(), 
-     * Then look for an `=` followed by an initializer expression. 
-     * If the user doesn’t initialize the variable, 
-     * the compiler implicitly initializes it to nil 
-     * by emitting an OP_NIL instruction. 
+    /* The keyword is followed by the variable name.
+     * That’s compiled by parseVariable(),
+     * Then look for an `=` followed by an initializer expression.
+     * If the user doesn’t initialize the variable,
+     * the compiler implicitly initializes it to nil
+     * by emitting an OP_NIL instruction.
      * Either way, expect the statement to be terminated with a semicolon. */
     if (match(TOKEN_EQUAL)) {
         expression();
@@ -736,32 +964,131 @@ static void varDeclaration()
 
 static void expressionStatement()
 {
-    /* An “expression statement” is simply an expression 
-     * followed by a semicolon. 
-     * They’re how you write an expression in a context 
-     * where a statement is expected. 
-     * Usually, it’s so that you can call a function 
+    /* An “expression statement” is simply an expression
+     * followed by a semicolon.
+     * They’re how you write an expression in a context
+     * where a statement is expected.
+     * Usually, it’s so that you can call a function
      * or evaluate an assignment for its side effect. */
     expression();
     consume(TOKEN_SEMICOLON, "Expect ';' after expression.");
-    /* Semantically, an expression statement evaluates the expression 
-     * and discards the result. 
-     * The compiler directly encodes that behavior. 
-     * It emits the code for the expression, 
+    /* Semantically, an expression statement evaluates the expression
+     * and discards the result.
+     * The compiler directly encodes that behavior.
+     * It emits the code for the expression,
      * and then an OP_POP instruction. */
     emitByte(OP_POP);
 }
 
 static void printStatement()
 {
-    /* A print statement evaluates an expression and prints the result, 
-     * so first parse and compile that expression. 
-     * The grammar expects a semicolon after that, 
-     * so consume it. 
+    /* A print statement evaluates an expression and prints the result,
+     * so first parse and compile that expression.
+     * The grammar expects a semicolon after that,
+     * so consume it.
      * Finally, emit a `OP_PRINT` instruction to print the result. */
     expression();
     consume(TOKEN_SEMICOLON, "Expect ';' after value.");
     emitByte(OP_PRINT);
+}
+
+static void returnStatement()
+{
+    if (current->type == TYPE_SCRIPT) {
+        error("Can't return from top-level code.");
+    }
+
+    /* The return value expression is optional,
+     * so the parser looks for a semicolon token
+     * to tell if a value was provided. */
+    if (match(TOKEN_SEMICOLON)) {
+        emitReturn();
+    } else {
+        expression();
+        consume(TOKEN_SEMICOLON, "Expect ';' after return value.");
+        emitByte(OP_RETURN);
+    }
+}
+
+static void forStatement()
+{
+    beginScope();
+    consume(TOKEN_LEFT_PAREN, "Expect '(' after 'for'.");
+    if (match(TOKEN_SEMICOLON)) {
+      // No initializer.
+    } else if (match(TOKEN_VAR)) {
+      varDeclaration();
+    } else {
+      expressionStatement();
+    }
+
+    int loopStart = currentChunk()->count;
+    int exitJump = -1;
+    if (!match(TOKEN_SEMICOLON)) {
+      expression();
+      consume(TOKEN_SEMICOLON, "Expect ';' after loop condition.");
+
+      // Jump out of the loop if the condition is false.
+      exitJump = emitJump(OP_JUMP_IF_FALSE);
+      emitByte(OP_POP);
+    }
+
+    if (!match(TOKEN_RIGHT_PAREN)) {
+        int bodyJump = emitJump(OP_JUMP);
+        int incrementStart = currentChunk()->count;
+        expression();
+        emitByte(OP_POP);
+        consume(TOKEN_RIGHT_PAREN, "Expect ')' after for clauses.");
+
+        emitLoop(loopStart);
+        loopStart = incrementStart;
+        patchJump(bodyJump);
+    }
+
+    statement();
+    emitLoop(loopStart);
+
+    if (exitJump != -1) {
+        patchJump(exitJump);
+        emitByte(OP_POP);
+    }
+
+    endScope();
+}
+
+static void ifStatement()
+{
+    consume(TOKEN_LEFT_PAREN, "Expect '(' after 'if'.");
+    expression();
+    consume(TOKEN_RIGHT_PAREN, "Expect ')' after condition.");
+
+    int thenJump = emitJump(OP_JUMP_IF_FALSE);
+    emitByte(OP_POP);
+    statement();
+
+    int elseJump = emitJump(OP_JUMP);
+
+    patchJump(thenJump);
+    emitByte(OP_POP);
+
+    if (match(TOKEN_ELSE)) statement();
+    patchJump(elseJump);
+}
+
+static void whileStatement()
+{
+    int loopStart = currentChunk()->count;
+    consume(TOKEN_LEFT_PAREN, "Expect '(' after 'while'.");
+    expression();
+    consume(TOKEN_RIGHT_PAREN, "Expect ')' after condition.");
+
+    int exitJump = emitJump(OP_JUMP_IF_FALSE);
+    emitByte(OP_POP);
+    statement();
+    emitLoop(loopStart);
+
+    patchJump(exitJump);
+    emitByte(OP_POP);
 }
 
 static void synchronize()
@@ -771,11 +1098,11 @@ static void synchronize()
     while (parser.current.type != TOKEN_EOF) {
         if (parser.previous.type == TOKEN_SEMICOLON) return;
 
-        /* Skip tokens indiscriminately until reach something 
-         * that looks like a statement boundary. 
-         * Recognize the boundary by looking for a preceding token 
-         * that can end a statement, like a semicolon. 
-         * Or we’ll look for a subsequent token that begins a statement, 
+        /* Skip tokens indiscriminately until reach something
+         * that looks like a statement boundary.
+         * Recognize the boundary by looking for a preceding token
+         * that can end a statement, like a semicolon.
+         * Or we’ll look for a subsequent token that begins a statement,
          * usually one of the control flow or declaration keywords. */
         switch (parser.current.type) {
             case TOKEN_CLASS:
@@ -797,17 +1124,19 @@ static void synchronize()
     }
 }
 
-/* Keep compiling declarations until we hit the end of the source file. */ 
+/* Keep compiling declarations until we hit the end of the source file. */
 static void declaration()
 {
-    if (match(TOKEN_VAR)) {
+    if (match(TOKEN_FUN)) {
+        funDeclaration();
+    } else if (match(TOKEN_VAR)) {
         varDeclaration();
     } else {
         statement();
     }
-    
-    /* If hit a compile error while parsing the previous statement, 
-     * will enter panic mode. 
+
+    /* If hit a compile error while parsing the previous statement,
+     * will enter panic mode.
      * In that case, after the statement, start synchronizing. */
     if (parser.panicMode) synchronize();
 }
@@ -816,31 +1145,35 @@ static void statement()
 {
     if (match(TOKEN_PRINT)) {
         printStatement();
+    } else if (match(TOKEN_FOR)) {
+       forStatement();
+    } else if (match(TOKEN_IF)) {
+        ifStatement();
+    } else if (match(TOKEN_RETURN)) {
+        returnStatement();
+    } else if (match(TOKEN_WHILE)) {
+        whileStatement();
     } else if (match(TOKEN_LEFT_BRACE)) {
-        /* Blocks are a kind of statement, 
+        /* Blocks are a kind of statement,
          * so the rule for them goes in the statement production. */
         beginScope();
         block();
         endScope();
     } else {
-        /* Wait until see the next statement. 
-         * If don’t see a print keyword, 
+        /* Wait until see the next statement.
+         * If don’t see a print keyword,
          * then must be looking at an expression statement. */
         expressionStatement();
     }
 }
 
-bool compile(const char* source, Chunk* chunk) {
-    /* Initialize the module variable 'compilingChunk' 
-     * before write any bytecode. */
-    compilingChunk = chunk;
-
-    /* Pass in the chunk where the compiler will write the code, 
+ObjFunction* compile(const char* source) {
+    /* Pass in the chunk where the compiler will write the code,
      * and then compile() returns whether or not compilation succeeded. */
     initScanner(source);
-    
+
     Compiler compiler;
-    initCompiler(&compiler);
+    initCompiler(&compiler, TYPE_SCRIPT);
 
     {
         parser.hadError  = false;
@@ -854,7 +1187,12 @@ bool compile(const char* source, Chunk* chunk) {
         declaration();
     }
 
-    endCompiler();
-    return !parser.hadError;
+    /* Get the function object from the compiler.
+     * If there were no compile errors, return it.
+     * Otherwise, signal an error by returning NULL.
+     * This way, the VM doesn’t try to execute a function
+     * that may contain invalid bytecode. */
+    ObjFunction* function = endCompiler();
+    return parser.hadError ? NULL : function;
 }
 

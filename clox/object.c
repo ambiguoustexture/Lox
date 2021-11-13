@@ -23,6 +23,29 @@ static Obj* allocateObject(size_t size, ObjType type)
     return object;
 }
 
+ObjFunction* newFunction()
+{
+    /* Instead of passing in arguments to initialize the function,
+     * set it up in a sort of “blank” state—zero arity,
+     * no name, and no code. */
+    ObjFunction* function = ALLOCATE_OBJ(ObjFunction, OBJ_FUNCTION); {
+        function->arity = 0;
+        function->name = NULL;
+        initChunk(&function->chunk);
+    }
+
+    return function;
+}
+
+ObjNative* newNative(NativeFn function)
+{
+    /* The constructor takes a C function pointer to wrap in an ObjNative.
+     * It sets up the object header and stores the function. */
+    ObjNative* native = ALLOCATE_OBJ(ObjNative, OBJ_NATIVE);
+    native->function = function;
+    return native;
+}
+
 static ObjString* allocateString(char* chars, int length, uint32_t hash) 
 {
     /* It creates a new ObjString on the heap and 
@@ -125,9 +148,25 @@ ObjString* copyString(const char* chars, int length)
     return allocateString(heapChars, length, hash);
 }
 
+static void printFunction(ObjFunction* function)
+{
+    if (function->name == NULL) {
+        printf("<script>");
+        return ;
+    }
+
+    printf("<fn %s>", function->name->chars);
+}
+
 void printObject(Value value)
 {
     switch (OBJ_TYPE(value)) {
+        case OBJ_FUNCTION:
+            printFunction(AS_FUNCTION(value));
+            break;
+        case OBJ_NATIVE:
+            printf("<native fn>");
+            break;
         case OBJ_STRING: 
             /* If the value is a heap-allocated object, 
              * it defers to a helper function over in the “object” module. */

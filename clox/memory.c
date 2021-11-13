@@ -50,6 +50,17 @@ static void freeObject(Obj* object)
     /* Free the character array 
      * and then free the ObjString. */
     switch (object->type) {
+        case OBJ_FUNCTION: {
+            ObjFunction* function = (ObjFunction*)object;
+            freeChunk(&function->chunk);
+            FREE(OBJ_FUNCTION, object);
+            break;
+        }
+
+        case OBJ_NATIVE: 
+            FREE(ObjNative, object);
+            break;
+
         case OBJ_STRING: {
             ObjString* string = (ObjString*)object;
             FREE_ARRAY(char, string->chars, string->length + 1);
