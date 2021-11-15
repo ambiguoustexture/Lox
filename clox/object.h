@@ -8,6 +8,7 @@
 /* Macro that extracts the object type tag from a given Value. */
 #define OBJ_TYPE(value)     (AS_OBJ(value)->type)
 
+#define IS_CLOSURE(value)   isObjType(value, OBJ_CLOSURE)
 #define IS_FUNCTION(value)  isObjType(value, OBJ_FUNCTION)
 
 /* A macro to see if a value is a native function. */
@@ -16,6 +17,7 @@
 /* Macro that detects a cast is safe. */
 #define IS_STRING(value)    isObjType(value, OBJ_STRING)
 
+#define AS_CLOSURE(value)   ((ObjClosure*)AS_OBJ(value))
 #define AS_FUNCTION(value)  ((ObjFunction*)AS_OBJ(value))
 #define AS_NATIVE(value) \
     (((ObjNative*)AS_OBJ(value))->function)
@@ -24,9 +26,11 @@
 #define AS_CSTRING(value)   (((ObjString*)AS_OBJ(value))->chars)
 
 typedef enum {
+    OBJ_CLOSURE,
     OBJ_FUNCTION,
     OBJ_NATIVE,
     OBJ_STRING,
+    OBJ_UPVALUE,
 } ObjType;
 
 struct Obj {
@@ -43,6 +47,7 @@ struct Obj {
 typedef struct {
     Obj        obj;
     int        arity;
+    int        upvalueCount;
     Chunk      chunk;
     ObjString* name;
 } ObjFunction;
@@ -84,10 +89,39 @@ struct ObjString {
     uint32_t hash;
 };
 
+typedef struct ObjUpvalue {
+    /* Runtime representation for upvalues. */
+    Obj    obj;
+    /* The location field that points to the closed-over variable. 
+     * Note that this is a pointer to a Value, not a Value itself. 
+     * It’s a reference to a variable, not a value. 
+     * This is important because it means that 
+     * when assign to the variable the upvalue captures, 
+     * are assigning to the actual variable, not a copy. */
+    Value* location;
+    Value closed;
+    struct ObjUpvalue* next;
+} ObjUpvalue;
+
+/* Wrap the ObjFunction in a new ObjClosure structure. 
+ * The latter has a reference to the underlying bare function 
+ * along with runtime state for the variables the function closes over. */
+typedef struct {
+    Obj obj;
+    ObjFunction* function;
+    /* The upvalues themselves are dynamically allocated, 
+     * so end up with a double pointer 
+     * — a pointer to a dynamically allocated array of pointers to upvalues. */
+    ObjUpvalue** upvalues;
+    int upvalueCount;
+} ObjClosure;
+
+ObjClosure*  newClosure();
 ObjFunction* newFunction();
 ObjNative* newNative(NativeFn function);
 ObjString* takeString(char* chars, int length);
 ObjString* copyString(const char* chars, int length);
+ObjUpvalue* newUpvalue(Value* slot);
 
 void printObject(Value value);
 

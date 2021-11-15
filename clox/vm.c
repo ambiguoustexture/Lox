@@ -27,6 +27,9 @@ static void resetStack()
     vm.stackTop = vm.stack;
     /* When the VM starts up, the CallFrame stack is empty. */
     vm.frameCount = 0;
+
+    /* The list starts out empty. */
+    vm.openUpvales = NULL;
 }
 
 static void runtimeError(const char* format, ...)
@@ -46,7 +49,7 @@ static void runtimeError(const char* format, ...)
 
     for (int i = vm.frameCount - 1; i >= 0; i--) {
         CallFrame* frame = &vm.frames[i];
-        ObjFunction* function = frame->function;
+        ObjFunction* function = frame->closure->function;
         // -1 because the IP is sitting on the next instruction to be executed.
         size_t instruction = frame->ip - function->chunk.code - 1;
         fprintf(stderr, "[line %d] in ",
@@ -135,11 +138,11 @@ static Value peek(int distance)
     return vm.stackTop[-1 - distance];
 }
 
-static bool call(ObjFunction* function, int argCount)
+static bool call(ObjClosure* closure, int argCount)
 {
-    if (argCount != function->arity) {
+    if (argCount != closure->function->arity) {
         runtimeError("Expected %d arguments but got %d.",
-                function->arity, argCount);
+                closure->function->arity, argCount);
         return false;
     }
 
@@ -157,8 +160,8 @@ static bool call(ObjFunction* function, int argCount)
      * that the arguments already on the stack line up
      * with the function’s parameters. */
     CallFrame* frame = &vm.frames[vm.frameCount++]; {
-        frame->function = function;
-        frame->ip       = function->chunk.code;
+        frame->closure = closure;
+        frame->ip       = closure->function->chunk.code;
 
         /* The funny little - 1 is to skip over local slot zero,
          * which contains the function being called. */
@@ -172,8 +175,8 @@ static bool callValue(Value callee, int argCount)
 {
     if (IS_OBJ(callee)) {
         switch (OBJ_TYPE(callee)) {
-            case OBJ_FUNCTION:
-                return call(AS_FUNCTION(callee), argCount);
+            case OBJ_CLOSURE: 
+                return call(AS_CLOSURE(callee), argCount);
 
             case OBJ_NATIVE: {
                 /* If the object being called is a native function,
@@ -197,6 +200,69 @@ static bool callValue(Value callee, int argCount)
 
     runtimeError("Can only call functions and classes.");
     return false;
+}
+
+static ObjUpvalue* captureUpvalue(Value* local)
+{
+    /* Whenever close over a local variable, 
+     * before creating a new upvalue, 
+     * look for an existing one in the list. 
+     *
+     * Start at the head of the list, 
+     * which is the upvalue closest to the top of the stack. 
+     * Walk through the list, 
+     * using a little pointer comparison to iterate past.
+     *
+     * Every upvalue pointing to slots above the one looking for. 
+     * While do that, keep track of the preceding upvalue on the list. 
+     * Need to update that node’s next pointer 
+     * if end up inserting a node after it.*/
+    ObjUpvalue* prevUpvalue = NULL;
+    ObjUpvalue* upvalue = vm.openUpvales;
+
+    while (upvalue != NULL && upvalue->location > local) {
+        /* Three ways to exit the loop:
+         * 1. The local slot stopped at is the slot looking for.
+         * 2. Ran out of upvalues to search.
+         * 3. Found an upvalue whose local slot is below the one looking for.
+         */
+        prevUpvalue = upvalue;
+        upvalue = upvalue->next;
+    }
+    
+    if (upvalue != NULL && upvalue->location == local) {
+        return upvalue;
+    }
+
+    ObjUpvalue* createdUpvalue = newUpvalue(local);
+    createdUpvalue->next = upvalue;
+
+    if (prevUpvalue == NULL) {
+        vm.openUpvales = createdUpvalue;
+    } else {
+        prevUpvalue->next = createdUpvalue;
+    }
+    
+    return createdUpvalue;
+}
+
+static void closeUpvalues(Value* last) 
+{
+    /* Takes a pointer to a stack slot. 
+     * It closes every open upvalue it can find 
+     * that points to that slot or any slot above it on the stack.
+     * Walk the VM’s list of open upvalues, again from top to bottom. 
+     * If an upvalue’s location points into the range of slots we’re closing, 
+     * close the upvalue. 
+     * Otherwise, once reach an upvalue outside of the range, 
+     * know the rest will be too so stop iterating. */
+    while (vm.openUpvales != NULL && 
+           vm.openUpvales->location >= last) {
+        ObjUpvalue* upvalue = vm.openUpvales;
+        upvalue->closed   = *upvalue->location;
+        upvalue->location = &upvalue->closed;
+        vm.openUpvales = upvalue->next;
+    }
 }
 
 static bool isFalsey(Value value)
@@ -238,7 +304,7 @@ static InterpretResult run()
     (frame->ip += 2, \
      (uint16_t)((frame->ip[-2] << 8) | frame->ip[-1]))
 #define READ_CONSTANT() \
-    (frame->function->chunk.constants.values[READ_BYTE()])
+    (frame->closure->function->chunk.constants.values[READ_BYTE()])
 
 #define READ_STRING() AS_STRING(READ_CONSTANT())
 
@@ -282,8 +348,8 @@ static InterpretResult run()
         {
         /* Instead of passing in the VM’s chunk and ip fields,
          * now read from the current CallFrame. */
-        disassembleInstruction(&frame->function->chunk,
-                (int)(frame->ip - frame->function->chunk.code));
+        disassembleInstruction(&frame->closure->function->chunk,
+                (int)(frame->ip - frame->closure->function->chunk.code));
         }
 
 #endif
@@ -395,6 +461,26 @@ static InterpretResult run()
                 break;
             }
 
+            case OP_GET_UPVALUE: {
+                /* The operand is the index 
+                 * into the current function’s upvalue array. 
+                 * So, simply look up the corresponding upvalue and 
+                 * dereference its location pointer 
+                 * to read the value in that slot. */
+                uint8_t slot = READ_BYTE();
+                push(*frame->closure->upvalues[slot]->location);             
+                break;
+            }
+
+            case OP_SET_UPVALUE: {
+                /* Take the value on top of the stack 
+                 * and store it into the slot pointed to by the chosen upvalue. 
+                 * Just as with the instructions for local variables, */ 
+                uint8_t slot = READ_BYTE();
+                *frame->closure->upvalues[slot]->location = peek(0);
+                break;
+            }
+
             case OP_EQUAL: {
                 Value b = pop();
                 Value a = pop();
@@ -450,6 +536,60 @@ static InterpretResult run()
                 printf("\n");
                 break;
             }
+            
+            case OP_CLOSURE: {
+                ObjFunction* function = AS_FUNCTION(READ_CONSTANT());
+                ObjClosure*  closure  = newClosure(function);
+                push(OBJ_VAL(closure));
+                
+                /* Fill the upvalue array over in the interpreter 
+                 * when it creates a closure. 
+                 * This is where walk through all of the operands 
+                 * after OP_CLOSURE 
+                 * to see what kind of upvalue each slot captures. */
+                for (int i = 0; i < closure->upvalueCount; i++) {
+                    /* Iterate over each upvalue the closure expects. 
+                     * For each one, read a pair of operand bytes. 
+                     * If the upvalue closes over a local variable 
+                     * in the enclosing function. */
+                    uint8_t isLocal = READ_BYTE();
+                    uint8_t index   = READ_BYTE();
+                    if (isLocal) {
+                        closure->upvalues[i] = 
+                            captureUpvalue(frame->slots + index);
+                    } else {
+                        /* Otherwise, 
+                         * capture an upvalue from the surrounding function. 
+                         * An OP_CLOSURE instruction is emitted 
+                         * at the end of a function declaration. 
+                         * At the moment that are executing that declaration, 
+                         * the current function is the surrounding one. */
+                        closure->upvalues[i] = 
+                            frame->closure->upvalues[index];
+                    }
+                }
+
+                break;      
+            }
+
+            case OP_CLOSE_UPVALUE: {
+                /* The compiler helpfully emits an OP_CLOSE_UPVALUE instruction 
+                 * to tell the VM 
+                 * exactly when a local variable 
+                 * should be hoisted onto the heap. 
+                 *
+                 * When reach that instruction, 
+                 * the variable hoisted is right on top of the stack. 
+                 * Call a helper function, 
+                 * passing the address of that stack slot. 
+                 * That function is responsible for closing the upvalue and 
+                 * moving the local from the stack to the heap. 
+                 * After that, the VM is free to discard the stack slot, 
+                 * which it does by calling pop(). */
+                closeUpvalues(vm.stackTop - 1);
+                pop();
+                break;
+            }
 
             case OP_RETURN: {
                 /* When a function returns a value,
@@ -485,6 +625,11 @@ static InterpretResult run()
                  * after the OP_CALL instruction. */
                 Value result = pop();
 
+                /* By passing the first slot in the function’s stack window, 
+                 * close every remaining open upvalue owned 
+                 * by the returning function. */
+                closeUpvalues(frame->slots);
+                
                 vm.frameCount--;
                 if (vm.frameCount == 0) {
                     pop();
@@ -560,7 +705,10 @@ InterpretResult interpret(const char* source)
     /* Now that have a handy function for initiating a CallFrame,
      * may as well use it to set up the first frame
      * for executing the top level code. */
-    call(function, 0);
+    ObjClosure* closure = newClosure(function);
+    pop();
+    push(OBJ_VAL(closure));
+    callValue(OBJ_VAL(closure), 0);
 
     /* After finishing, the VM used to free the hardcoded chunk.
      * Now that the ObjFunction owns that code,

@@ -16,7 +16,7 @@ typedef struct {
     /* A CallFrame represents a single ongoing function call.
      * The slots field points into the VM’s value stack
      * at the first slot that this function can use. */
-    ObjFunction* function;
+    ObjClosure* closure;
     uint8_t* ip;
     Value*   slots;
 } CallFrame;
@@ -67,6 +67,14 @@ typedef struct {
      * Since want them to persist as long as clox is running,
      * store them right in the VM. */
     Table globals;
+
+    /* The VM owns the list of open upvalues, 
+     * so the head pointer goes right inside the main VM struct. 
+     *
+     * Starting with the first upvalue pointed to by the VM, 
+     * each open upvalue points to the next open upvalue that 
+     * references a local variable farther down the stack. */
+    ObjUpvalue* openUpvales;
 
     /* The VM stores a pointer to the head of the intrusive list. */
     Obj* objects;

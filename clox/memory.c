@@ -50,6 +50,26 @@ static void freeObject(Obj* object)
     /* Free the character array 
      * and then free the ObjString. */
     switch (object->type) {
+        case OBJ_CLOSURE: {
+            /* When an ObjClosure is freed, we also free the upvalue array. */
+            ObjClosure* closure = (ObjClosure*)object;
+            FREE_ARRAY(ObjUpvalue*, closure->upvalues, closure->upvalueCount);
+            /* ObjClosure does not own the ObjUpvalue objects itself, 
+             * but it does own its dynamic array 
+             * that contains pointers to those upvalues. */
+
+            /* Only free the ObjClosure itself, not the ObjFunction. 
+             * That’s because the closure doesn’t own the function. 
+             * There may be multiple closures 
+             * that all reference the same function, 
+             * and none of them claims any special privilege over it. 
+             * Can’t free the ObjFunction 
+             * until all objects referencing it are gone 
+             * — including even the surrounding function 
+             * whose constant table contains it. */
+            FREE(ObjClosure, object);
+            break;
+        }
         case OBJ_FUNCTION: {
             ObjFunction* function = (ObjFunction*)object;
             freeChunk(&function->chunk);
@@ -65,6 +85,14 @@ static void freeObject(Obj* object)
             ObjString* string = (ObjString*)object;
             FREE_ARRAY(char, string->chars, string->length + 1);
             FREE(ObjString, object);
+            break;
+        }
+
+        case OBJ_UPVALUE: {
+            /* Multiple closures can close over the same variable, 
+             * so ObjUpvalue does not own the variable it references. 
+             * Thus, the only thing to free is the ObjUpvalue itself. */
+            FREE(ObjUpvalue, object);
             break;
         }
     }

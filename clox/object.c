@@ -23,6 +23,29 @@ static Obj* allocateObject(size_t size, ObjType type)
     return object;
 }
 
+ObjClosure*  newClosure(ObjFunction* function)
+{
+    /* When create an ObjClosure, 
+     * allocate an upvalue array of the proper size, 
+     * which determined at compile time and stored in the ObjFunction. */
+    ObjUpvalue** upvalues = ALLOCATE(ObjUpvalue*, function->upvalueCount);
+    for (int i= 0; i < function->upvalueCount; i++) {
+        /* Before creating the closure object itself, 
+         * allocate the array of upvalues and initialize them all to NULL. 
+         * This weird ceremony around memory is a careful dance 
+         * to please the (forthcoming) garbage collection deities. 
+         * It ensures the memory manager never sees uninitialized memory. */
+        upvalues[i] = NULL;
+    }
+
+    /* It takes a pointer to the ObjFunction it wraps. */
+    ObjClosure* closure = ALLOCATE_OBJ(ObjClosure, OBJ_CLOSURE);
+    closure->function = function;
+    closure->upvalues = upvalues;
+    closure->upvalueCount = function->upvalueCount;
+    return closure;
+}
+
 ObjFunction* newFunction()
 {
     /* Instead of passing in arguments to initialize the function,
@@ -30,6 +53,7 @@ ObjFunction* newFunction()
      * no name, and no code. */
     ObjFunction* function = ALLOCATE_OBJ(ObjFunction, OBJ_FUNCTION); {
         function->arity = 0;
+        function->upvalueCount = 0;
         function->name = NULL;
         initChunk(&function->chunk);
     }
@@ -148,6 +172,17 @@ ObjString* copyString(const char* chars, int length)
     return allocateString(heapChars, length, hash);
 }
 
+ObjUpvalue* newUpvalue(Value* slot) 
+{
+    ObjUpvalue* upvalue = ALLOCATE_OBJ(ObjUpvalue, OBJ_UPVALUE);
+    /* Zero the `closed` field out when create an ObjUpvalue 
+     * so there’s no uninitialized memory floating around. */
+    upvalue->closed = NIL_VAL;
+    upvalue->location = slot;
+    upvalue->next = NULL;
+    return upvalue;
+}
+
 static void printFunction(ObjFunction* function)
 {
     if (function->name == NULL) {
@@ -161,6 +196,9 @@ static void printFunction(ObjFunction* function)
 void printObject(Value value)
 {
     switch (OBJ_TYPE(value)) {
+        case OBJ_CLOSURE: 
+            printFunction(AS_CLOSURE(value)->function);
+            break;
         case OBJ_FUNCTION:
             printFunction(AS_FUNCTION(value));
             break;
@@ -171,6 +209,9 @@ void printObject(Value value)
             /* If the value is a heap-allocated object, 
              * it defers to a helper function over in the “object” module. */
             printf("%s", AS_CSTRING(value));
+            break;
+        case OBJ_UPVALUE:
+            printf("upvalue");
             break;
     }
 }
