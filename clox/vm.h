@@ -76,8 +76,36 @@ typedef struct {
      * references a local variable farther down the stack. */
     ObjUpvalue* openUpvales;
 
+    /* The idea is that the collector frequency automatically adjusts 
+     * based on the live size of the heap. 
+     * Track the total number of bytes of managed memory 
+     * that the VM has allocated. 
+     * When it goes above some threshold, trigger a GC. 
+     * After that, note 
+     * how many bytes of memory remain 
+     * — how many were not freed. 
+     * Then adjust the threshold to some value larger than that. 
+     * The result is that as the amount of live memory increases, 
+     * collect less frequently in order to avoid sacrificing throughput 
+     * by re-traversing the growing pile of live objects. 
+     * As the amount of live memory goes down, 
+     * collect more frequently 
+     * so that don’t lose too much latency by waiting too long. */
+    
+    /* The `bytesAllocated` is a running total 
+     * of the number of bytes of managed memory the VM has allocated. 
+     * The `nextGC` is the threshold that triggers the next collection. 
+     * Initialize them when the VM starts up: */
+    size_t bytesAllocated;
+    size_t nextGC;
+
     /* The VM stores a pointer to the head of the intrusive list. */
     Obj* objects;
+
+    /* Fields for the tri-color abstraction. */
+    int grayCount;
+    int grayCapacity;
+    Obj** grayStack;
 } VM;
 
 typedef enum {

@@ -17,9 +17,18 @@ static Obj* allocateObject(size_t size, ObjType type)
     Obj* object = (Obj*)reallocate(NULL, 0, size);
     object->type = type;
 
+    /* Every new object begins life unmarked 
+     * because haven’t determined if it is reachable or not yet.*/
+    object->isMarked = false;
+
     /* Every time allocate an Obj, insert it in the list. */
     object->next = vm.objects;
     vm.objects = object;
+
+#ifdef DEBUG_LOG_GC
+    printf("%p allocate %ld for %d\n", (void*)object, size, type);
+#endif 
+
     return object;
 }
 
@@ -85,6 +94,7 @@ static ObjString* allocateString(char* chars, int length, uint32_t hash)
      * pass in its hash code. */
     string->hash = hash;
 
+    push(OBJ_VAL(string));
     /* Automatically intern every new string. 
      * That means whenever create a new unique string, add it to the table.
      *
@@ -92,6 +102,7 @@ static ObjString* allocateString(char* chars, int length, uint32_t hash)
      * The keys are the strings and those are all care about, 
      * so just use nil for the values. */
     tableSet(&vm.strings, string, NIL_VAL);
+    pop();
 
     return string;
 }

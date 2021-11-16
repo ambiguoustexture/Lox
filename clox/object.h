@@ -38,6 +38,10 @@ struct Obj {
      * that contains the state shared across all object types. 
      * It’s sort of like the “base class” for objects. */
     ObjType type;
+    
+    /* The new field lives in the Obj header struct all objects share.*/
+    bool isMarked;
+
     /* An intrusive list 
      * — the Obj struct itself will be the linked list node. 
      * Each Obj gets a pointer to the next Obj in the chain. */

@@ -271,3 +271,32 @@ ObjString* tableFindString(Table* table, const char* chars, int length,
         index = (index + 1) % table->capacity;
     }
 }
+
+void tableRemoveWhite(Table* table) 
+{
+    /* Walk every entry in the table. 
+     * The string intern table only uses the key of each entry 
+     * — it’s basically a hash set not a hash map. 
+     * If the key string object’s mark bit is not set, 
+     * then it is a white object that is moments from being swept away. 
+     * Delete it from the hash table first and 
+     * thus ensure won’t see any dangling pointers. */
+    for (int i = 0; i < table->capacity; i++) {
+        Entry* entry = &table->entries[i];
+        if (entry->key != NULL && !entry->key->obj.isMarked) {
+            tableDelete(table, entry->key);
+        }
+    }
+}
+
+void markTable(Table* table)
+{
+    /* Walk the entry array. For each one, mark its value. 
+     * Also mark the key strings 
+     * for each entry since the GC manages those strings too. */
+    for (int i = 0; i < table->capacity; i++) {
+        Entry* entry = &table->entries[i];
+        markObject((Obj*)entry->key);
+        markValue(entry->value);
+    }
+}

@@ -84,6 +84,21 @@ void initVM()
 
     vm.objects = NULL;
 
+    /* The starting threshold here is arbitrary. 
+     * It’s similar to the initial capacity picked for various dynamic arrays. 
+     * The goal is to not trigger the first few GCs too quickly 
+     * but also to not wait too long. 
+     * If had some real-world Lox programs, 
+     * could profile those to tune this. */ 
+    vm.bytesAllocated = 0;
+    vm.nextGC = 1024 * 1024;
+
+    /* The worklist for gray objects starts out empty: */
+    vm.grayCount    = 0;
+    vm.grayCapacity = 0;
+    vm.grayStack    = NULL;
+
+
     /* Initialize the hash table to a valid state when the VM boots up. */
     initTable(&vm.globals);
 
@@ -278,8 +293,8 @@ static void concatenate()
      * and then copy the two halves in.
      * As always, carefully ensure the string is terminated.
      */
-    ObjString* b = AS_STRING(pop());
-    ObjString* a = AS_STRING(pop());
+    ObjString* b = AS_STRING(peek(0));
+    ObjString* a = AS_STRING(peek(1));
 
     int length = a->length + b->length;
     char* chars = ALLOCATE(char, length + 1);
@@ -288,6 +303,8 @@ static void concatenate()
     chars[length] = '\0';
 
     ObjString* result = takeString(chars, length);
+    pop();
+    pop();
     push(OBJ_VAL(result));
 }
 
