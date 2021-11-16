@@ -4,7 +4,7 @@ prog = clox
 source = *.c
 
 $(prog): $(source)
-	$(cc) $(source) -g -o $(prog)
+	$(cc) $(source) -g -Wall -o $(prog)
 
 clean:
 	rm -rf clox clox.dSYM build
