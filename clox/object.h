@@ -137,10 +137,10 @@ typedef struct {
     Table fields;
 } ObjInstance;
 
-ObjClass*    newClass();
-ObjClosure*  newClosure();
+ObjClass*    newClass(ObjString* name);
+ObjClosure*  newClosure(ObjFunction* function);
 ObjFunction* newFunction();
-ObjInstance* newInstance();
+ObjInstance* newInstance(ObjClass* klass);
 ObjNative*   newNative(NativeFn function);
 ObjString*   takeString(char* chars, int length);
 ObjString*   copyString(const char* chars, int length);

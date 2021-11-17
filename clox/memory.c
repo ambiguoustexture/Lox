@@ -42,7 +42,7 @@ void* reallocate(void* pointer, size_t oldSize, size_t newSize)
      * Otherwise, the VM can get into a starved state 
      * where it needs more memory but never collects any. */
     if (newSize > oldSize) {
-#ifdef DEBUG_STREE_GC
+#ifdef DEBUG_STRESS_GC
         collectGarbage();
 #endif
     
@@ -143,8 +143,7 @@ void markValue(Value value)
      * so the first thing need to do is ensure that 
      * the value is an actual heap object. 
      * If so, the real work happens in the "markObject()" function. */
-    if (IS_OBJ(value)) return;
-    markObject(AS_OBJ(value));
+    if (IS_OBJ(value)) markObject(AS_OBJ(value));
 }
 
 static void markArray(ValueArray* array)

@@ -39,6 +39,7 @@ ObjClass* newClass(ObjString* name)
      * the VM will create a new one of these ObjClass structs 
      * to represent it. */
     ObjClass* klass = ALLOCATE_OBJ(ObjClass, OBJ_CLASS);
+    klass->name = name;
     return klass;
 }
 
@@ -230,8 +231,7 @@ void printObject(Value value)
 {
     switch (OBJ_TYPE(value)) {
         case OBJ_CLASS:
-            printf("%s", 
-                AS_CLASS(value)->name->chars);
+            printf("%s", AS_CLASS(value)->name->chars);
         case OBJ_CLOSURE: 
             printFunction(AS_CLOSURE(value)->function);
             break;
