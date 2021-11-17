@@ -45,11 +45,11 @@ void* reallocate(void* pointer, size_t oldSize, size_t newSize)
 #ifdef DEBUG_STREE_GC
         collectGarbage();
 #endif
-    }
     
-    /* When the total crosses the limit, run the collector. */
-    if (vm.bytesAllocated > vm.nextGC) {
-        collectGarbage();
+        /* When the total crosses the limit, run the collector. */
+        if (vm.bytesAllocated > vm.nextGC) {
+            collectGarbage();
+        }
     }
     
     /* When newSize is zero, 
@@ -123,7 +123,7 @@ void markObject(Obj* object)
      * — also add it to the worklist. */
     if (vm.grayCapacity < vm.grayCount + 1) {
         vm.grayCapacity = GROW_CAPACITY(vm.grayCapacity);
-        vm.grayStack = realloc(vm.grayStack, sizeof(Obj*) * vm.grayCapacity);
+        vm.grayStack = (Obj**)realloc(vm.grayStack, sizeof(Obj*) * vm.grayCapacity);
 
         /* Take full responsibility for this array. 
          * That includes allocation failure. 
@@ -143,7 +143,7 @@ void markValue(Value value)
      * so the first thing need to do is ensure that 
      * the value is an actual heap object. 
      * If so, the real work happens in the "markObject()" function. */
-    if (!IS_OBJ(value)) return;
+    if (IS_OBJ(value)) return;
     markObject(AS_OBJ(value));
 }
 
@@ -168,6 +168,11 @@ static void blackenObject(Obj* object)
      * — strings and native function objects contain no outgoing references 
      * so there is nothing to traverse. */
     switch (object->type) {
+        case OBJ_CLASS: {
+            ObjClass* klass = (ObjClass*)object;
+            markObject((Obj*)klass->name);
+            break;
+        }
         case OBJ_CLOSURE: {
             /* Each closure has a reference to the bare function it wraps, 
              * as well as an array of pointers to the upvalues it captures. */
@@ -187,6 +192,17 @@ static void blackenObject(Obj* object)
             markObject((Obj*)function->name);
             markArray(&function->chunk.constants);
             break;
+        }
+        case OBJ_INSTANCE: {
+            /* If the instance is alive, need to keep its class around. 
+             * Also, need to keep every object 
+             * referenced by the instance’s fields. 
+             * Most live objects that are not roots are reachable 
+             * because some instance references the object in a field. */ 
+            ObjInstance* instance = (ObjInstance*)object;
+            markObject((Obj*)instance->klass);
+            markTable(&instance->fields);
+            break;            
         }
         case OBJ_UPVALUE:
             /* When an upvalue is closed, 
@@ -211,6 +227,10 @@ static void freeObject(Obj* object)
     /* Free the character array 
      * and then free the ObjString. */
     switch (object->type) {
+        case OBJ_CLASS: {
+            FREE(ObjClass, object);
+            break;            
+        }
         case OBJ_CLOSURE: {
             /* When an ObjClosure is freed, we also free the upvalue array. */
             ObjClosure* closure = (ObjClosure*)object;
@@ -237,7 +257,12 @@ static void freeObject(Obj* object)
             FREE(OBJ_FUNCTION, object);
             break;
         }
-
+        case OBJ_INSTANCE: {
+            ObjInstance* instance = (ObjInstance*)object;
+            freeTable(&instance->fields);
+            FREE(ObjInstance, object);
+            break;            
+        }
         case OBJ_NATIVE: 
             FREE(ObjNative, object);
             break;

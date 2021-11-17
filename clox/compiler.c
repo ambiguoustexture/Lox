@@ -691,9 +691,47 @@ static void binary(bool canAssign)
 
 }
 
-static void call(bool canAssign) {
+static void call(bool canAssign) 
+{
     uint8_t argCount = argumentList();
     emitBytes(OP_CALL, argCount);
+}
+
+static void dot(bool canAssign)
+{
+    /* The parser expects to find a property name 
+     * immediately after the dot. 
+     * Load that token’s lexeme into the constant table as a string 
+     * so that the name is available at runtime. */
+    consume(TOKEN_IDENTIFIER, "Expect property name after '.'.");
+    uint8_t name = identifierConstant(&parser.previous);
+
+    /* If see an equals sign after the field name, 
+     * it must be a set expression that is assigning to a field. 
+     * But don’t always allow an equals sign after the field to be compiled. 
+     *
+     * Only parse and compile the equals part when canAssign is true. 
+     * If an equals token appears when canAssign is false, 
+     * dot() leaves it alone and returns. 
+     * In that case, the compiler will eventually 
+     * unwind up to parsePrecedence() 
+     * which stops at the unexpected = still 
+     * sitting as the next token and reports an error.
+     *
+     * If found an = in a context where it is allowed, 
+     * then compile the right - hand expression being stored in the field. 
+     * After that, emit a new OP_SET_PROPERTY instruction. 
+     * That takes a single operand for the index of the property name 
+     * in the constant table. 
+     * If didn’t compile a set expression, 
+     * assume it’s a getter and emit an OP_GET_PROPERTY instruction, 
+     * which also takes an operand for the property name. */
+    if (canAssign && match(TOKEN_EQUAL)) {
+        expression();
+        emitBytes(OP_SET_PROPERTY, name);
+    } else {
+        emitBytes(OP_GET_PROPERTY, name);
+    }
 }
 
 static void literal(bool canAssign)
@@ -828,7 +866,7 @@ ParseRule rules[] = {
     [TOKEN_LEFT_BRACE]    = {NULL,     NULL,   PREC_NONE},
     [TOKEN_RIGHT_BRACE]   = {NULL,     NULL,   PREC_NONE},
     [TOKEN_COMMA]         = {NULL,     NULL,   PREC_NONE},
-    [TOKEN_DOT]           = {NULL,     NULL,   PREC_NONE},
+    [TOKEN_DOT]           = {NULL,     dot,    PREC_CALL},
     [TOKEN_MINUS]         = {unary,    binary, PREC_TERM},
     [TOKEN_PLUS]          = {NULL,     binary, PREC_TERM},
     [TOKEN_SEMICOLON]     = {NULL,     NULL,   PREC_NONE},
@@ -1066,6 +1104,41 @@ static void function(FunctionType type)
     }
 }
 
+static void classDeclaration()
+{
+    /* Class declarations are statements and the parser recognizes one 
+     * by the leading class keyword. */
+    consume(TOKEN_IDENTIFIER, "Expect class name.");
+
+    /* Immediately after the class keyword is the class’s name. 
+     * Take that identifier and 
+     * add it to the surrounding function’s constant table as a string. */ 
+    uint8_t nameConstant = identifierConstant(&parser.previous);
+    
+    /* The class’s name is also used to bind the class object 
+     * to a variable of the same name. 
+     * So declare a variable with that identifier 
+     * right after consuming its token. */
+    declareVariable();
+
+    /* Emit a new instruction to actually create the class object at runtime.
+     * That instruction takes the constant table index 
+     * of the class’s name as an operand. */
+    emitBytes(OP_CLASS, nameConstant);
+    /* Before compiling the body of the class, 
+     * define the variable for the class’s name. 
+     * Declaring the variable adds it to the scope. 
+     * For classes, we define the variable before the body. 
+     * That way, users can refer to the containing class 
+     * inside the bodies of methods. 
+     * That’s useful for things like factory methods. */
+    defineVariable(nameConstant);
+
+    /* Compile the body. */ 
+    consume(TOKEN_LEFT_BRACE,  "Expect '{' before class body.");
+    consume(TOKEN_RIGHT_BRACE, "Expect '}' after class body." );
+}
+
 static void funDeclaration()
 {
     /* Functions are first class values
@@ -1273,8 +1346,10 @@ static void synchronize()
 
 /* Keep compiling declarations until we hit the end of the source file. */
 static void declaration()
-{
-    if (match(TOKEN_FUN)) {
+{   
+    if (match(TOKEN_CLASS)) {
+        classDeclaration();
+    } else if (match(TOKEN_FUN)) {
         funDeclaration();
     } else if (match(TOKEN_VAR)) {
         varDeclaration();

@@ -1,0 +1,20 @@
+var a = "first value";
+a = "updated";
+// GC here
+print a;
+
+var global = "string";
+{
+    var local = " another";
+    print global + local;
+}
+
+fun makeClosure() {
+    var a = "data";
+    fun f() { print a; }
+    return f; 
+}
+
+var closure = makeClosure();
+// GC here.
+closure();

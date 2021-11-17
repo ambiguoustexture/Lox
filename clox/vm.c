@@ -190,6 +190,17 @@ static bool callValue(Value callee, int argCount)
 {
     if (IS_OBJ(callee)) {
         switch (OBJ_TYPE(callee)) {
+            case OBJ_CLASS: {
+                /* If the value being called — the object that results 
+                 * when evaluating the expression 
+                 * to the left of the opening parenthesis — is a class, 
+                 * then treat it as a constructor call. 
+                 * Create a new instance of the called class 
+                 * and store the result in the stack. */
+                ObjClass* klass = AS_CLASS(callee);
+                vm.stackTop[-argCount - 1] = OBJ_VAL(newInstance(klass)); 
+                return true;
+            }
             case OBJ_CLOSURE: 
                 return call(AS_CLOSURE(callee), argCount);
 
@@ -498,6 +509,81 @@ static InterpretResult run()
                 break;
             }
 
+            case OP_GET_PROPERTY: {
+                /* Only instances are allowed to have fields. 
+                 * Can’t stuff a field onto a string or number. 
+                 * So need to check that the value is an instance 
+                 * before accessing any fields on it. */
+                if (!IS_INSTANCE(peek(0))) {
+                    runtimeError("Obly instance have properties.");
+                    return INTERPRET_RUNTIME_ERROR;
+                }
+
+                /* When the interpreter reaches this instruction, 
+                 * the expression to the left of the . has already 
+                 * been executed and the resulting instance 
+                 * is on top of the stack. 
+                 * Read the field name from the constant pool 
+                 * and look it up in the instance’s field table. 
+                 * If the hash table contains an entry with that name, 
+                 * pop the instance and push the entry’s value as the result. */
+                ObjInstance* instance = AS_INSTANCE(peek(0));
+                ObjString* name = READ_STRING();
+
+                Value value;
+                if (tableGet(&instance->fields, name, &value)) {
+                    pop(); // Instance.
+                    push(value);
+                    break;
+                }
+
+                /* Check for non-exist field 
+                 * and defined that as a runtime error, 
+                 * and abort if it happens. */
+                runtimeError("Undefined property '%s'.", name->chars);
+                return INTERPRET_RUNTIME_ERROR;
+            }
+
+            case OP_SET_PROPERTY: {
+                /* Unlike when reading a field, 
+                 * don’t need to worry about the hash table 
+                 * not containing the field. 
+                 * A setter implicitly creates the field if needed. 
+                 * Do need to handle the user incorrectly trying 
+                 * to store a field on a value that isn’t an instance. 
+                 *
+                 * Check the value’s type and report a runtime error 
+                 * if it’s invalid. 
+                 * And, with that, the stateful side of Lox’s support 
+                 * for object-oriented programming is in place. */ 
+                if (!IS_INSTANCE(peek(1))) {
+                    runtimeError("Only instance have fields.");
+                    return INTERPRET_RUNTIME_ERROR;
+                }
+                /* On top of the stack, 
+                 * first have the instance whose field is being set and 
+                 * then above that is the value to be stored 
+                 * in the instance’s field. 
+                 * Read the instruction’s operand and 
+                 * find the field name string. 
+                 * Using that, store the value on top of the stack 
+                 * into the instance’s field table. */
+                ObjInstance* instance = AS_INSTANCE(peek(1));
+                tableSet(&instance->fields, READ_STRING(), peek(0));
+
+                /* Pop the stored value off, then pop the instance, 
+                 * and finally push the value back on. 
+                 * In other words, remove the second element from the stack 
+                 * while leaving the top alone. 
+                 * A setter is itself an expression 
+                 * whose result is the assigned value, 
+                 * so need to leave that value on the stack. */ 
+                Value value = pop();
+                pop();
+                push(value);
+                break;
+            }
+
             case OP_EQUAL: {
                 Value b = pop();
                 Value a = pop();
@@ -657,6 +743,21 @@ static InterpretResult run()
                 push(result);
 
                 frame = &vm.frames[vm.frameCount - 1];
+                break;
+            }
+
+            case OP_CLASS: {
+                /* Load the string for the class’s name 
+                 * from the constant table and pass that to newClass(). 
+                 * That creates a new class object with the given name. 
+                 * Push that onto the stack. 
+                 * If the class is bound to a global variable, 
+                 * then the compiler’s call to defineVariable() 
+                 * will emit code to store that object 
+                 * from the stack into the global variable table. 
+                 * Otherwise, it’s right where it needs to be 
+                 * on the stack for a new local variable. */
+                push(OBJ_VAL(newClass(READ_STRING())));
                 break;
             }
 
