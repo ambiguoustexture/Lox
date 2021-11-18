@@ -32,6 +32,17 @@ static Obj* allocateObject(size_t size, ObjType type)
     return object;
 }
 
+ObjBoundMethod* newBoundMethod(Value receiver, ObjClosure* method)
+{
+    /* This constructor-like function 
+     * simply stores the given receiver and method. */
+    ObjBoundMethod* bound = ALLOCATE_OBJ(ObjBoundMethod, OBJ_BOUND_METHOD); {
+        bound->receiver = receiver;
+        bound->method   = method;
+    }
+    return bound;
+}
+
 ObjClass* newClass(ObjString* name) 
 {
     /* It takes in the class’s name as a string and stores it. 
@@ -40,6 +51,9 @@ ObjClass* newClass(ObjString* name)
      * to represent it. */
     ObjClass* klass = ALLOCATE_OBJ(ObjClass, OBJ_CLASS);
     klass->name = name;
+    
+    /* A new class begins with an empty method table. */
+    initTable(&klass->methods);
     return klass;
 }
 
@@ -232,6 +246,9 @@ void printObject(Value value)
     switch (OBJ_TYPE(value)) {
         case OBJ_CLASS:
             printf("%s", AS_CLASS(value)->name->chars);
+            break;
+        case OBJ_BOUND_METHOD:
+            printFunction(AS_BOUND_METHOD(value)->method->function);
             break;
         case OBJ_CLOSURE:
             printFunction(AS_CLOSURE(value)->function);

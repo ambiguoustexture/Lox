@@ -9,6 +9,7 @@
 /* Macro that extracts the object type tag from a given Value. */
 #define OBJ_TYPE(value)     (AS_OBJ(value)->type)
 
+#define IS_BOUND_METHOD(value) isObjType(value, OBJ_BOUND_METHOD)
 #define IS_CLASS(value)     isObjType(value, OBJ_CLASS)
 #define IS_CLOSURE(value)   isObjType(value, OBJ_CLOSURE)
 #define IS_FUNCTION(value)  isObjType(value, OBJ_FUNCTION)
@@ -20,16 +21,17 @@
 /* Macro that detects a cast is safe. */
 #define IS_STRING(value)    isObjType(value, OBJ_STRING)
 
-#define AS_CLASS(value)        ((ObjClass*)AS_OBJ(value))
-#define AS_CLOSURE(value)    ((ObjClosure*)AS_OBJ(value))
-#define AS_FUNCTION(value)  ((ObjFunction*)AS_OBJ(value))
-#define AS_INSTANCE(value)  ((ObjInstance*)AS_OBJ(value))
-#define AS_NATIVE(value)     (((ObjNative*)AS_OBJ(value))->function)
-
-#define AS_STRING(value)    ((ObjString*)AS_OBJ(value))
-#define AS_CSTRING(value)   (((ObjString*)AS_OBJ(value))->chars)
+#define AS_BOUND_METHOD(value) ((ObjBoundMethod*)AS_OBJ(value))
+#define AS_CLASS(value)              ((ObjClass*)AS_OBJ(value))
+#define AS_CLOSURE(value)          ((ObjClosure*)AS_OBJ(value))
+#define AS_FUNCTION(value)        ((ObjFunction*)AS_OBJ(value))
+#define AS_INSTANCE(value)        ((ObjInstance*)AS_OBJ(value))
+#define AS_NATIVE(value)           (((ObjNative*)AS_OBJ(value))->function)
+#define AS_STRING(value)            ((ObjString*)AS_OBJ(value))
+#define AS_CSTRING(value)          (((ObjString*)AS_OBJ(value))->chars)
 
 typedef enum {
+    OBJ_BOUND_METHOD,
     OBJ_CLASS,
     OBJ_CLOSURE,
     OBJ_FUNCTION,
@@ -129,6 +131,11 @@ typedef struct {
 typedef struct {
     Obj obj;
     ObjString* name;
+
+    /* Each class stores a hash table of methods. 
+     * Keys are method names and 
+     * each value is an ObjClosure for the body of the method. */
+    Table methods;
 } ObjClass;
 
 typedef struct {
@@ -137,6 +144,26 @@ typedef struct {
     Table fields;
 } ObjInstance;
 
+typedef struct {
+    /* When the user executes a method access, 
+     * we’ll find the closure for that method and wrap it 
+     * in a new “bound method” object 
+     * that tracks the instance that the method was accessed from. 
+     * This bound object can be called later like a function. 
+     * When invoked, the VM will do some shenanigans 
+     * to wire up this to point to the receiver inside the method’s body. */
+    Obj obj;
+    /* The receiver’s type is Value 
+     * even though methods can only be called on ObjInstances. 
+     * Since the VM doesn’t care what kind of receiver it has anyway, 
+     * using Value means don’t have to 
+     * keep converting the pointer back to a Value 
+     * when it gets passed to more general functions. */
+    Value receiver;
+    ObjClosure* method;
+} ObjBoundMethod;
+
+ObjBoundMethod* newBoundMethod(Value receiver, ObjClosure* method);
 ObjClass*    newClass(ObjString* name);
 ObjClosure*  newClosure(ObjFunction* function);
 ObjFunction* newFunction();

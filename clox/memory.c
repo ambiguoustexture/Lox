@@ -167,9 +167,31 @@ static void blackenObject(Obj* object)
      * — strings and native function objects contain no outgoing references 
      * so there is nothing to traverse. */
     switch (object->type) {
+        case OBJ_BOUND_METHOD: {
+            /* The bound method has a couple of references, 
+             * but it doesn’t own them, so it frees nothing but itself. 
+             * However, those references 
+             * do get traced by the garbage collector. 
+             * This ensures that 
+             * a handle to a method keeps the receiver around in memory 
+             * so that this can still find the object 
+             * when invoke the handle later. */
+            ObjBoundMethod* bound = (ObjBoundMethod*)object;
+            markValue(bound->receiver);
+            
+            /* Also trace the method closure. */
+            markObject((Obj*)bound->method);
+            break;
+        }
         case OBJ_CLASS: {
             ObjClass* klass = (ObjClass*)object;
             markObject((Obj*)klass->name);
+
+            /* The GC needs to trace through classes into the method table. 
+             * If a class is still reachable (likely through some instance), 
+             * then all of its methods certainly need to stick around too. */
+            markTable(&klass->methods);
+
             break;
         }
         case OBJ_CLOSURE: {
@@ -226,7 +248,18 @@ static void freeObject(Obj* object)
     /* Free the character array 
      * and then free the ObjString. */
     switch (object->type) {
+        case OBJ_BOUND_METHOD:
+            /* The bound method has a couple of references, 
+             * but it doesn’t own them, so it frees nothing but itself. */
+            FREE(ObjBoundMethod, object);
+            break;
         case OBJ_CLASS: {
+            /* The ObjClass struct owns the memory for the method table, 
+             * so when the memory manager deallocates a class, 
+             * the table should be freed too. */
+            ObjClass* klass = (ObjClass*)object;
+            freeTable(&klass->methods);
+            
             FREE(ObjClass, object);
             break;            
         }
@@ -329,6 +362,10 @@ static void markRoots()
      * from the rest of the VM, 
      * do that in a separate function. */
     markCompilerRoots();
+
+    /* Make the `initString` to stick around, 
+     * so the GC considers it a root. */
+    markObject((Obj*)vm.initString);
 
 }
 

@@ -61,6 +61,12 @@ typedef struct {
     /* String Interning */
     Table strings;
 
+    /* To call the initializer, 
+     * the runtime looks up the init() method by name. 
+     * It would be good to take advantage of the string interning. 
+     * To do that, the VM creates an ObjString for “init” and reuses it. */ 
+    ObjString* initString;
+
     /* Global Variables
      *
      * Need a place to store these globals.

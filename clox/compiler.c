@@ -76,6 +76,8 @@ typedef enum {
      * This lets the compiler tell when it’s compiling top level code
      * versus the body of a function. */
     TYPE_FUNCTION,
+    TYPE_INITIALIZER,
+    TYPE_MEHTOD,
     TYPE_SCRIPT
 } FunctionType;
 
@@ -103,6 +105,16 @@ typedef struct Compiler {
     int scopeDepth;
 } Compiler;
 
+typedef struct ClassCompiler {
+    /* Information about the nearest enclosing class. 
+     * If had that, could use it to determine if inside a method.
+     * 
+     * Store only the class’s name. 
+     * Also keep a pointer to the ClassCompiler for the enclosing class, if any. */ 
+    struct ClassCompiler* enclosing;
+    Token name;
+} ClassCompiler;
+
 /* With a single global variable of the Parser struct type 
  * so don’t need to pass the state around from function to function; */
 Parser parser;
@@ -112,6 +124,10 @@ Compiler* current = NULL;
 /* The chunk pointer is stored in a module level variable 
  * like storing other global state. */
 Chunk* compilingChunk;
+
+/* Information about the nearest enclosing class. 
+ * If had that, could use it here to determine if inside a method. */
+ClassCompiler* currentClass = NULL;
 
 static Chunk* currentChunk()
 {
@@ -250,7 +266,18 @@ static int emitJump(uint8_t instruction)
 
 static void emitReturn()
 {
-    emitByte(OP_NIL);
+    /* Whenever the compiler emits the implicit return 
+     * at the end of a body, 
+     * check the type to decide 
+     * whether to insert the initializer-specific behavior. */
+    if (current->type == TYPE_INITIALIZER) {
+        /* In an initializer, 
+         * instead of pushing nil onto the stack before returning, 
+         * load slot zero, which contains the instance. */
+        emitBytes(OP_GET_LOCAL, 0);
+    } else {
+        emitByte(OP_NIL);
+    }
     emitByte(OP_RETURN);
 }
 
@@ -340,8 +367,21 @@ static void initCompiler(Compiler* compiler, FunctionType type)
     Local* local = &current->locals[current->localCount++]; {
         local->depth = 0;
         local->isCaptured = false;
-        local->name.start  = "";
-        local->name.length = 0;
+
+        /* For function calls, the slot ends up holding the function being called. 
+         * Since the slot has no name, the function body never accesses it. 
+         * For method calls, repurpose that slot to store the receiver. 
+         * Slot zero will store the instance that this is bound to. 
+         * In order to compile this expressions, 
+         * the compiler simply needs to give the right name 
+         * to that local variable. */
+        if (type != TYPE_FUNCTION) {
+            local->name.start = "ego";
+            local->name.length = 3;
+        } else {
+            local->name.start = "";
+            local->name.length = 0;
+        }
     }
 }
 
@@ -729,6 +769,26 @@ static void dot(bool canAssign)
     if (canAssign && match(TOKEN_EQUAL)) {
         expression();
         emitBytes(OP_SET_PROPERTY, name);
+    } 
+    /*  Since recognize the `access-call` pair of operations 
+     *  at compile time, 
+     *  there is the opportunity to emit a new special instruction 
+     *  that performs an optimized method call. */ 
+    else if (match(TOKEN_LEFT_PAREN)) {
+        uint8_t argCount = argumentList();
+        /* After the compiler has parsed the property name, 
+         * look for a left parenthesis. 
+         * If match one, switch to a new code path. 
+         * There, compile the argument list exactly like 
+         * when compiling a call expression. 
+         * Then emit a single new OP_INVOKE instruction. 
+         *
+         * In other words, 
+         * this single instruction combines the operands 
+         * of the OP_GET_PROPERTY and OP_CALL instructions 
+         * it replaces, in that order. */ 
+        emitBytes(OP_INVOKE, name);
+        emitByte(argCount);
     } else {
         emitBytes(OP_GET_PROPERTY, name);
     }
@@ -842,6 +902,37 @@ static void variable(bool canAssign)
     namedVariable(parser.previous, canAssign);
 }
 
+static void ego(bool canAssign)
+{
+    /* The reason bound methods need to keep hold of the receiver is 
+     * so that it can be accessed inside the body of the method. 
+     * Treat `ego` as a lexically-scoped local variable 
+     * whose value gets magically initialized. 
+     * Compiling it like a local variable 
+     * means get a lot of behavior for free. 
+     * In particular, closures inside a method 
+     * that reference `ego` will do the right thing and 
+     * capture the receiver in an upvalue. */
+
+    /* When an outermost class body ends, 
+     * enclosing will be NULL, so this resets currentClass to NULL. 
+     * Thus to see if inside a class — and 
+     * thus inside a method — simply check that module variable. */ {
+        if (currentClass == NULL) {
+            error("Can't use 'this' outside of a class.");
+            return;
+        }
+    }
+
+    /* Call the existing variable() function 
+     * which compiles identifier expressions as variable accesses. 
+     * It takes a single Boolean parameter 
+     * for whether the compiler should look for a following = operator 
+     * and parse a setter. 
+     * Can’t assign to `ego`, so pass false to disallow that. */
+    variable(false);
+}
+
 static void unary(bool canAssign)
 {
     TokenType operatorType = parser.previous.type;
@@ -895,7 +986,7 @@ ParseRule rules[] = {
     [TOKEN_PRINT]         = {NULL,     NULL,   PREC_NONE},
     [TOKEN_RETURN]        = {NULL,     NULL,   PREC_NONE},
     [TOKEN_SUPER]         = {NULL,     NULL,   PREC_NONE},
-    [TOKEN_EGO]           = {NULL,     NULL,   PREC_NONE},
+    [TOKEN_EGO]           = {ego,      NULL,   PREC_NONE},
     [TOKEN_TRUE]          = {literal,  NULL,   PREC_NONE},
     [TOKEN_VAR]           = {NULL,     NULL,   PREC_NONE},
     [TOKEN_WHILE]         = {NULL,     NULL,   PREC_NONE},
@@ -1104,15 +1195,55 @@ static void function(FunctionType type)
     }
 }
 
+static void method()
+{
+    /* Like OP_GET_PROPERTY and other instructions 
+     * that need names at runtime, 
+     * the compiler adds the method name token’s lexeme 
+     * to the constant table, getting back a table index. 
+     * Then emit an OP_METHOD instruction 
+     * with that index as the operand. That’s the name. */
+    consume(TOKEN_IDENTIFIER, "Expect method name.");
+    uint8_t constant = identifierConstant(&parser.previous);
+
+    FunctionType type = TYPE_MEHTOD;
+
+    /* Whenever the front end compiles an initializer method, 
+     * it will emit different bytecode at the end of the body 
+     * to return `ego` from the method 
+     * instead of the usual implicit nil most functions return. 
+     * In order to do that, the compiler needs to actually know 
+     * when it is compiling an initializer. 
+     * Detect that by checking to see 
+     * if the name of the method compiling is “init” */
+    if (parser.previous.length == 4 && 
+            memcmp(parser.previous.start, "init", 4) == 0) {
+        type = TYPE_INITIALIZER;
+    } 
+
+    /* The `function()` utility function 
+     * compiles the subsequent parameter list and function body. 
+     * Then it emits the code to create an ObjClosure 
+     * and leave it on top of the stack. 
+     * At runtime, the VM will find the closure there. */
+    function(type);
+    emitBytes(OP_METHOD, constant);
+}
+
 static void classDeclaration()
 {
     /* Class declarations are statements and the parser recognizes one 
      * by the leading class keyword. */
     consume(TOKEN_IDENTIFIER, "Expect class name.");
 
+    /* Capture the namme of the class 
+     * after consume its identifier token. */
+    Token className = parser.previous;
+
     /* Immediately after the class keyword is the class’s name. 
      * Take that identifier and 
-     * add it to the surrounding function’s constant table as a string. */ 
+     * add it to the surrounding function’s constant table 
+     * as a string. */ 
     uint8_t nameConstant = identifierConstant(&parser.previous);
     
     /* The class’s name is also used to bind the class object 
@@ -1121,7 +1252,8 @@ static void classDeclaration()
      * right after consuming its token. */
     declareVariable();
 
-    /* Emit a new instruction to actually create the class object at runtime.
+    /* Emit a new instruction 
+     * to actually create the class object at runtime.
      * That instruction takes the constant table index 
      * of the class’s name as an operand. */
     emitBytes(OP_CLASS, nameConstant);
@@ -1134,9 +1266,51 @@ static void classDeclaration()
      * That’s useful for things like factory methods. */
     defineVariable(nameConstant);
 
+    /* If aren’t inside any class declaration at all, 
+     * the module variable currentClass is NULL. 
+     * When the compiler begins compiling a class, 
+     * it pushes a new ClassCompiler onto that implict linked stack. */
+    ClassCompiler classCompiler; {
+        classCompiler.name      = parser.previous;
+        classCompiler.enclosing = currentClass; 
+    }
+    currentClass = &classCompiler;
+
+    /* Before start binding methods, 
+     * emit whatever code is necessary 
+     * to load the class back on top of the stack. 
+     *
+     * Right before compiling the class body, 
+     * call namedVariable(). 
+     * That helper function generates code to load a variable 
+     * with the given name onto the stack. 
+     * Then compile the methods. */
+    namedVariable(className, false);
+
     /* Compile the body. */ 
     consume(TOKEN_LEFT_BRACE,  "Expect '{' before class body.");
+
+    /* Compile a series of method declarations between the braces. 
+     * Stop compiling methods when hit the final curly 
+     * or if reach the end of the file. */
+    while (!check(TOKEN_RIGHT_BRACE) && !check(TOKEN_EOF)) {
+        method();
+    }
+
     consume(TOKEN_RIGHT_BRACE, "Expect '}' after class body." );
+
+    /* When execute each OP_METHOD instruction, 
+     * the top of the stack is the closure 
+     * for the method with the class right under it. 
+     * Once reached the end of the methods, 
+     * no longer need the class and pop it off the stack. */
+    emitByte(OP_POP);
+
+    /* The memory for the ClassCompiler struct lives right on the C stack, 
+     * a handy capability get by writing our compiler using recursive descent. 
+     * At the end of the class body, 
+     * pop that compiler off the stack and restore the enclosing one. */
+    currentClass = currentClass->enclosing;
 }
 
 static void funDeclaration()
@@ -1224,6 +1398,16 @@ static void returnStatement()
     if (match(TOKEN_SEMICOLON)) {
         emitReturn();
     } else {
+        /* Report an error 
+         * if a return statement in an initializer has a value. 
+         * Still go ahead and compile the value afterwards 
+         * so that the compiler doesn’t get confused 
+         * by the trailing expression and 
+         * report a bunch of cascaded errors. */
+        if (current->type == TYPE_INITIALIZER) {
+            error("Can't return a value from an initializer.");
+        }
+
         expression();
         consume(TOKEN_SEMICOLON, "Expect ';' after return value.");
         emitByte(OP_RETURN);

@@ -102,6 +102,15 @@ void initVM()
     /* Initialize the hash table to a valid state when the VM boots up. */
     initTable(&vm.globals);
 
+    /* Function itself allocates memory, 
+     * which can trigger a GC. 
+     * If the collector ran at just the wrong time, 
+     * it would read `vm.initString` before it had been initialized. 
+     * So, first zero the field out */
+    vm.initString = NULL;
+    /* Create and intern the string when the VM boots up. */
+    vm.initString = copyString("init", 4);
+
     /* When spin up a new VM, the string table is empty. */
     initTable(&vm.strings);
 
@@ -114,6 +123,8 @@ void freeVM()
 
     /* When shut down the VM, clean up any resources used by the table. */
     freeTable(&vm.strings);
+
+    vm.initString = NULL;
 
     /* Once the program is done, free every object. */
     freeObjects();
@@ -190,6 +201,28 @@ static bool callValue(Value callee, int argCount)
 {
     if (IS_OBJ(callee)) {
         switch (OBJ_TYPE(callee)) {
+            case OBJ_BOUND_METHOD: {
+                /* Pull the raw closure back out of the ObjBoundMethod 
+                 * and use the existing call() helper 
+                 * to begin an invocation of that closure 
+                 * by pushing a CallFrame for it onto the call stack. */
+                ObjBoundMethod* bound = AS_BOUND_METHOD(callee);
+                
+                /* At runtime, the receiver isn’t actually in slot zero. 
+                 * The interpreter isn’t holding up its end of the bargain yet. 
+                 * 
+                 * When a method is called, 
+                 * the top of the stack contains all of the arguments 
+                 * and then just under those is the closure of the called method. 
+                 * That’s where slot zero in the new CallFrame will be. */ 
+                /* The `-argCount` skips past the arguments 
+                 * and the `- 1` adjusts for the fact 
+                 * that stackTop points just past the last used stack slot. */
+                vm.stackTop[-argCount - 1] = bound->receiver;
+                
+                return call(bound->method, argCount);
+            }
+
             case OBJ_CLASS: {
                 /* If the value being called — the object that results 
                  * when evaluating the expression 
@@ -199,6 +232,26 @@ static bool callValue(Value callee, int argCount)
                  * and store the result in the stack. */
                 ObjClass* klass = AS_CLASS(callee);
                 vm.stackTop[-argCount - 1] = OBJ_VAL(newInstance(klass)); 
+
+                /* In Lox, the runtime allocates new raw instances, 
+                 * and a class may declare an initializer to set up any fields. 
+                 * And first, automatically calling init() on new instances. */
+                Value initializer;
+                if (tableGet(&klass->methods, vm.initString, &initializer)) {
+                    /* After the runtime allocates the new instance, 
+                     * look for an init() method on the class. 
+                     * If find one, initiate a call to it. 
+                     * This pushes a new CallFrame for the initializer’s closure. */
+                    return call(AS_CLOSURE(initializer), argCount);
+                } else if (argCount != 0) {
+                    /* If there is no init() method, 
+                     * then it doesn’t make any sense 
+                     * to pass arguments to the class when creating the instance. */
+                    runtimeError("Expected 0 arguments but got %d.", 
+                            argCount);
+                    return false;
+                }
+
                 return true;
             }
             case OBJ_CLOSURE: 
@@ -226,6 +279,83 @@ static bool callValue(Value callee, int argCount)
 
     runtimeError("Can only call functions and classes.");
     return false;
+}
+
+static bool invokeFromClass(ObjClass* klass, ObjString* name, int argCount) 
+{
+    /* Combines the logic of 
+     * how the VM implements OP_GET_PROPERTY and OP_CALL instructions, 
+     * in that order. 
+     * First look up the method by name in the class’s method table. 
+     * If don’t find one, report that runtime error and exit. */
+    Value method;
+    if (!tableGet(&klass->methods, name, &method)) {
+        runtimeError("Undefined property '%s'.", name->chars);
+        return false;
+    }
+
+    /* Otherwise, take the method’s closure and push a call to it 
+     * onto the CallFrame stack. 
+     * Don’t need to heap allocate and initialize an ObjBoundMethod. 
+     * In fact, don’t even need to juggle anything on the stack. 
+     * The receiver and method arguments are already right where they need to be. */
+    return call(AS_CLOSURE(method), argCount);
+}
+
+static bool invoke(ObjString* name, int argCount) 
+{
+    /* First grab the receiver off the stack. 
+     * The arguments passed to the method are above it on the stack, 
+     * so peek that many slots down. 
+     * Then cast the object to an instance and invoke the method on it. */
+    Value receiver = peek(argCount);
+
+    /* As with OP_GET_PROPERTY instructions, 
+     * also need to handle the case where 
+     * a user incorrectly tries to call a method on a value of the wrong type. */
+    if (!IS_INSTANCE(receiver)) {
+        runtimeError("Only instances have methods.");
+        return false;
+    }
+    ObjInstance* instance = AS_INSTANCE(receiver);
+
+    /* Before looking up a method on the instance’s class, 
+     * look for a field with the same name. 
+     * If find a field, then store it on the stack in place of the receiver, 
+     * under the argument list. 
+     * This is how OP_GET_PROPERTY behaves since the latter instruction executes 
+     * before a subsequent parenthesized list of arguments has been evaluated. 
+     * Then try to call that field’s value like the callable that it hopefully is. 
+     * The callValue() helper will check the value’s type and 
+     * call it as appropriate or report a runtime error 
+     * if the field’s value isn’t a callable type like a closure. */
+    Value value;
+    if (tableGet(&instance->fields, name, &value)) {
+        vm.stackTop[-argCount - 1] = value;
+        return callValue(value, argCount);
+    }
+
+    return invokeFromClass(instance->klass, name, argCount);
+}
+
+static bool bindMethod(ObjClass* klass, ObjString* name)
+{
+    /* First look for a method with the given name in the class’s method table. 
+     * If don’t find one, report a runtime error and bail out. 
+     * Otherwise, take the method and wrap it in a new ObjBoundMethod. 
+     * Grab the receiver from its home on top of the stack. 
+     * Finally, pop the instance and replace the top of the stack 
+     * with the bound method. */
+    Value method;
+    if (!tableGet(&klass->methods, name, &method)) {
+        runtimeError("Undefined property '%s'.", name->chars);
+        return false;
+    }
+
+    ObjBoundMethod* bound = newBoundMethod(peek(0), AS_CLOSURE(method));
+    pop();
+    push(OBJ_VAL(bound));
+    return true;
 }
 
 static ObjUpvalue* captureUpvalue(Value* local)
@@ -289,6 +419,19 @@ static void closeUpvalues(Value* last)
         upvalue->location = &upvalue->closed;
         vm.openUpvales = upvalue->next;
     }
+}
+
+static void defineMethod(ObjString* name)
+{
+    /* The method closure is on top of the stack, 
+     * above the class it will be bound to. 
+     * Read those two stack slots and 
+     * store the closure in the class’s method table. 
+     * Then pop the closure since we’re done with it. */
+    Value method = peek(0);
+    ObjClass* klass = AS_CLASS(peek(1));
+    tableSet(&klass->methods, name, method);
+    pop();
 }
 
 static bool isFalsey(Value value)
@@ -537,11 +680,18 @@ static InterpretResult run()
                     break;
                 }
 
-                /* Check for non-exist field 
-                 * and defined that as a runtime error, 
-                 * and abort if it happens. */
-                runtimeError("Undefined property '%s'.", name->chars);
-                return INTERPRET_RUNTIME_ERROR;
+                /* Take the instance’s class and pass it to bindMethod() helper. 
+                 * If the function finds a method, 
+                 * it places the method on the stack and returns true. 
+                 * Otherwise it returns false 
+                 * to indicate a method with that name couldn’t be found. 
+                 * Since the name also wasn’t a field, 
+                 * that means we have a runtime error, 
+                 * which aborts the interpreter.*/
+                if (!bindMethod(instance->klass, name)) {
+                    return INTERPRET_RUNTIME_ERROR;
+                }
+                break;
             }
 
             case OP_SET_PROPERTY: {
@@ -638,6 +788,26 @@ static InterpretResult run()
                 printValue(pop());
                 printf("\n");
                 break;
+            }
+
+            case OP_INVOKE: {
+                /* Look up the method name from the first operand and 
+                 * then read the argument count operand. 
+                 * Then hand off to invoke() to do the heavy lifting. 
+                 * That function returns true if the invocation succeeds. 
+                 * As usual, a false return means a runtime error occurred. 
+                 * Check for that here and abort the interpreter 
+                 * if disaster struck. */
+                ObjString* method = READ_STRING();
+                int argCount = READ_BYTE();
+                if (!invoke(method, argCount)) {
+                    return INTERPRET_RUNTIME_ERROR;
+                }
+                /* Finally, assuming the invocation succeeded, 
+                 * then there is a new CallFrame on the stack, 
+                 * so refresh our cached copy of the current frame in frame. */
+                frame = &vm.frames[vm.frameCount - 1];
+                break;                
             }
             
             case OP_CLOSURE: {
@@ -790,6 +960,10 @@ static InterpretResult run()
                 frame = &vm.frames[vm.frameCount - 1];
                 break;
             }
+
+            case OP_METHOD:
+                defineMethod(READ_STRING());
+                break;
         }
     }
 
