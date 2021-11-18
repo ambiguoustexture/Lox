@@ -114,7 +114,7 @@ static void adjustCapacity(Table* table, int capacity)
      * and would just slow down lookups. */
     table->count = 0;
     for (int i = 0; i < table->capacity; i++) {
-        Entry* entry = &table->entries[1];
+        Entry* entry = &table->entries[i];
         if (entry->key == NULL) continue;
 
         Entry* dst = findEntry(entries, capacity, entry->key);
