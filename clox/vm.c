@@ -733,6 +733,31 @@ static InterpretResult run()
                 push(value);
                 break;
             }
+            
+            case OP_GET_SUPER: {
+                /* Read the method name from the constant table. 
+                 * Then pass that to bindMethod() 
+                 * which looks up the method in the given class’s method table 
+                 * and creates an ObjBoundMethod 
+                 * to bundle the resulting closure to the current instance. */
+                ObjString* name = READ_STRING();
+                /* For a super call, don’t use the instance’s class. 
+                 * Instead, use the statically resolved superclass 
+                 * of the containing class, 
+                 * which the compiler has conveniently ensured 
+                 * is sitting on top of the stack. */
+                ObjClass*  superclass = AS_CLASS(pop());
+                /* Pop that superclass and pass it to bindMethod(), 
+                 * which correctly skips over any overriding methods 
+                 * in any of the subclasses 
+                 * between that superclass and the instance’s own class. 
+                 * It also correctly includes any methods 
+                 * inherited by the superclass from any of its superclasses. */
+                if (!bindMethod(superclass, name)) {
+                    return INTERPRET_RUNTIME_ERROR;
+                }
+                break;
+            }
 
             case OP_EQUAL: {
                 Value b = pop();
@@ -808,6 +833,35 @@ static InterpretResult run()
                  * so refresh our cached copy of the current frame in frame. */
                 frame = &vm.frames[vm.frameCount - 1];
                 break;                
+            }
+        
+            case OP_SUPER_INVOKE: {
+                /* Basically the implementation of OP_INVOKE 
+                 * mixed together with a dash of OP_GET_SUPER. */
+
+                /* First, pull out the method name and argument count operands. 
+                 * Then pop the superclass off the top of the stack 
+                 * so that can look up the method in its method table. 
+                 * This conveniently leaves the stack set up 
+                 * just right for a method call. */
+                ObjString* method = READ_STRING();
+                int argCount = READ_BYTE();                
+                ObjClass* superclass = AS_CLASS(pop());
+                /* Pass the superclass, method name, and argument count 
+                 * to the existing invokeFromClass() function. 
+                 * That function looks up the given method on the given class 
+                 * and attempts to create a call to it with the given arity. 
+                 * If a method could not be found, 
+                 * it returns false and bail out of the interpreter. 
+                 * Otherwise, invokeFromClass() pushes a new CallFrame 
+                 * onto the call stack for the method’s closure. 
+                 * That invalidates the interpreter’s cached CallFrame pointer, 
+                 * so refresh frame. */
+                if (!invokeFromClass(superclass, method, argCount)) {
+                    return INTERPRET_RUNTIME_ERROR;
+                }
+                frame = &vm.frames[vm.frameCount - 1];
+                break;
             }
             
             case OP_CLOSURE: {
@@ -960,6 +1014,31 @@ static InterpretResult run()
                 frame = &vm.frames[vm.frameCount - 1];
                 break;
             }
+
+            case OP_INHERIT: {
+                /* The top of the stack contains the superclass 
+                 * with the subclass on top. 
+                 * Grab both of those and then do the inherit-y bit. 
+                 * This is where clox takes a different path than jlox. 
+                 * In the first jlox interpreter, 
+                 * each subclass stored a reference to its superclass. 
+                 * When a method was accessed, 
+                 * if didn’t find it in the subclass’s method table, 
+                 * recursed through the inheritance chain 
+                 * looking at each ancestor’s method table until found it. */
+                Value superclass = peek(1);
+                /* Runtime check for invalid superclasses. */
+                if (!IS_CLASS(superclass)) {
+                    runtimeError("Superclass must be a class.");
+                    return INTERPRET_RUNTIME_ERROR;
+                }
+
+                ObjClass* subclass = AS_CLASS(peek(0));
+                tableAddAll(&AS_CLASS(superclass)->methods, 
+                            &subclass->methods);
+                pop(); // Subclass
+                break;
+            } 
 
             case OP_METHOD:
                 defineMethod(READ_STRING());

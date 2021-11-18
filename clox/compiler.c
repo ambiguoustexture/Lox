@@ -113,6 +113,7 @@ typedef struct ClassCompiler {
      * Also keep a pointer to the ClassCompiler for the enclosing class, if any. */ 
     struct ClassCompiler* enclosing;
     Token name;
+    bool hasSuperslass;
 } ClassCompiler;
 
 /* With a single global variable of the Parser struct type 
@@ -902,6 +903,83 @@ static void variable(bool canAssign)
     namedVariable(parser.previous, canAssign);
 }
 
+static Token syntheticToken(const char* text)
+{
+    /* A little helper function to create a synthetic token 
+     * for the given constant string. */
+    Token token; {
+        token.start  = text;
+        token.length = (int)strlen(text);
+    } 
+    return token;
+}
+
+static void super_(bool canAssign)
+{
+    /* A super token is not a standalone expression. 
+     * Instead, the dot and method name following it 
+     * are inseparable parts of the syntax. */ 
+    
+    /* A super call is only meaningful 
+     * inside the body of a method 
+     * (or in a function nested inside a method), 
+     * and only inside the method of a class that has a superclass. 
+     * Detect both of these cases using the value of currentClass. 
+     * If that’s NULL or points to a class with no superclass, 
+     * report those errors. */
+    if (currentClass == NULL) {
+        error("Can't use 'super' outside of a class.");
+    } else if (!currentClass->hasSuperslass) {
+        error("Can;t use 'super' in a class with no superclass.");
+    }
+
+    /* In other words, Lox doesn’t really have `super call` expressions, 
+     * it has `super access` expressions, 
+     * which can choose to immediately invoke if want. 
+     * So when the compiler hits a super token, 
+     * consume the subsequent `.` token and then look for a method name. 
+     * Methods are looked up dynamically, 
+     * so use identifierConstant() 
+     * to take the lexeme of the method name token 
+     * and store it in the constant table just like 
+     * do for property access expressions. */
+    consume(TOKEN_DOT, "Expect '.' after 'super'.");
+    consume(TOKEN_IDENTIFIER, "Expect superclass method name.");
+    uint8_t name = identifierConstant(&parser.previous);
+
+    /* In order to access a superclass method on the current instance, 
+     * the runtime needs both the receiver 
+     * and the superclass of the surrounding method’s class. 
+     * The first namedVariable() call generates code 
+     * to look up the current receiver stored in the hidden variable “ego” 
+     * and push it onto the stack. 
+     * The second namedVariable() call emits code 
+     * to look up the superclass from its “super” variable 
+     * and push that on top. */
+    namedVariable(syntheticToken("ego"),   false);
+    /* Before emit anything, look for a parenthesized argument list. 
+     * If find one, compile that. Then load the superclass. 
+     * After that, emit a new OP_SUPER_INVOKE instruction. 
+     * This superinstruction 
+     * combines the behavior of OP_GET_SUPER and OP_CALL, 
+     * so it takes two operands: 
+     * the constant table index of the method name to lookup and 
+     * the number of arguments to pass to it. */
+    if (match(TOKEN_LEFT_PAREN)) {
+        uint8_t argCount = argumentList();
+        namedVariable(syntheticToken("super"), false);
+        emitBytes(OP_SUPER_INVOKE, name);
+        emitByte(argCount);
+    } else {
+        /* Otherwise, 
+         * if don’t find a '(', 
+         * continue to compile the expression as a super access 
+         * like did before and emit an OP_GET_SUPER. */
+        namedVariable(syntheticToken("super"), false);
+        emitBytes(OP_GET_SUPER, name);
+    }
+}
+
 static void ego(bool canAssign)
 {
     /* The reason bound methods need to keep hold of the receiver is 
@@ -985,7 +1063,7 @@ ParseRule rules[] = {
     [TOKEN_OR]            = {NULL,     or_,    PREC_OR},
     [TOKEN_PRINT]         = {NULL,     NULL,   PREC_NONE},
     [TOKEN_RETURN]        = {NULL,     NULL,   PREC_NONE},
-    [TOKEN_SUPER]         = {NULL,     NULL,   PREC_NONE},
+    [TOKEN_SUPER]         = {super_,     NULL,   PREC_NONE},
     [TOKEN_EGO]           = {ego,      NULL,   PREC_NONE},
     [TOKEN_TRUE]          = {literal,  NULL,   PREC_NONE},
     [TOKEN_VAR]           = {NULL,     NULL,   PREC_NONE},
@@ -1271,10 +1349,53 @@ static void classDeclaration()
      * When the compiler begins compiling a class, 
      * it pushes a new ClassCompiler onto that implict linked stack. */
     ClassCompiler classCompiler; {
-        classCompiler.name      = parser.previous;
-        classCompiler.enclosing = currentClass; 
+        classCompiler.name          = parser.previous;
+        classCompiler.hasSuperslass = false;
+        classCompiler.enclosing     = currentClass; 
     }
     currentClass = &classCompiler;
+
+    /* After compile the class name, 
+     * if the next token is a < then found a superclass clause. 
+     * Consume the superclass’s identifier token, 
+     * then call variable(). 
+     * That function takes the previously consumed token, 
+     * treats it as a variable reference, 
+     * and emits code to load the variable’s value. 
+     * In other words, it looks up the superclass by name 
+     * and pushes it onto the stack. */
+    if (match(TOKEN_LESS)) {
+        consume(TOKEN_IDENTIFIER, "Expect superclasses name.");
+        variable(false);
+
+        /* A class cannot be its own superclass. */
+        if (identifiersEqual(&className, &parser.previous)) {
+            error("A class can't inherit from itself.");
+        }
+
+        /* Over in the front end, 
+         * compiling the superclass clause emits bytecode 
+         * that loads the superclass onto the stack. 
+         * Instead of leaving that slot as a temporary, 
+         * create a new scope and make it a local variable. */
+        beginScope();
+        /* Creating a new lexical scope ensures 
+         * that if declare two classes in the same scope, 
+         * each has a different local slot to store its superclass. */ 
+        addLocal(syntheticToken("super"));
+        defineVariable(0);
+
+        
+        /* After that, call namedVariable() to load the subclass 
+         * doing the inheriting onto the stack, 
+         * followed by an OP_INHERIT instruction. 
+         * That instruction wires up the superclass to the new subclass. */
+        namedVariable(className, false);
+        emitByte(OP_INHERIT);
+
+        /* If see a superclass clause, know compiling a subclass. */
+        classCompiler.hasSuperslass = true;
+    }
 
     /* Before start binding methods, 
      * emit whatever code is necessary 
@@ -1305,6 +1426,17 @@ static void classDeclaration()
      * Once reached the end of the methods, 
      * no longer need the class and pop it off the stack. */
     emitByte(OP_POP);
+
+    /* Pop the scope and discard the “super” variable 
+     * after compiling the class body and its methods. 
+     * That way, the variable is accessible 
+     * in all of the methods of the subclass. 
+     * It’s a somewhat pointless optimization, 
+     * but only create the scope if there is a superclass clause. 
+     * Thus need to only close the scope if there is one. */
+    if (classCompiler.hasSuperslass) {
+        endScope();
+    }
 
     /* The memory for the ClassCompiler struct lives right on the C stack, 
      * a handy capability get by writing our compiler using recursive descent. 
