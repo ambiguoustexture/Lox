@@ -50,7 +50,7 @@ int addConstant(Chunk* chunk, Value value)
 {
     push(value);
     writeValueArray(&chunk->constants, value);
-    pop(value);
+    pop();
 
     /*
      * After add the constant, 
