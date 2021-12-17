@@ -1,8 +1,4 @@
-# Compile a debug build of clox.
-make -f c.make NAME=cloxd  MODE=debug   SOURCE_DIR=.
+# CLox
 
-# Compile the C interpreter.
-make -f c.make NAME=clox   MODE=release SOURCE_DIR=.
+![main](./main_8c__incl.png)
 
-# Compile the C interpreter as ANSI standard C++.
-make -f c.make NAME=cpplox MODE=debug   CPP=true SOURCE_DIR=.
