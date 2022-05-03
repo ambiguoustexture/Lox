@@ -1,4 +1,4 @@
 # CLox
 
-![main](./main_8c__incl.png)
+![main](./main.png)
 
